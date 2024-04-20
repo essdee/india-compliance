@@ -63,7 +63,7 @@ def migrate_e_waybill_fields():
         )
 
     frappe.db.bulk_insert(
-        "e-Waybill Log", fields=fields, values=values, ignore_duplicates=True
+        "e-Waybill Log", fields=fields, values=values, ignore_duplicates=True, chunk_size=500
     )
 
 
@@ -131,7 +131,7 @@ def migrate_e_invoice_fields():
         )
 
     frappe.db.bulk_insert(
-        "e-Invoice Log", fields=fields, values=values, ignore_duplicates=True
+        "e-Invoice Log", fields=fields, values=values, ignore_duplicates=True, chunk_size= 500
     )
 
 
@@ -202,7 +202,7 @@ def migrate_e_invoice_request_log():
         )
 
     frappe.db.bulk_insert(
-        "Integration Request", fields=fields, values=values, ignore_duplicates=True
+        "Integration Request", fields=fields, values=values, ignore_duplicates=True, chunk_size=500
     )
 
 

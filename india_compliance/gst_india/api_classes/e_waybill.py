@@ -9,7 +9,7 @@ from india_compliance.gst_india.constants import DISTANCE_REGEX
 
 class EWaybillAPI(BaseAPI):
     API_NAME = "e-Waybill"
-    BASE_PATH = "ewb/ewayapi"
+    BASE_PATH = "enriched/ewb/ewayapi"
     SENSITIVE_INFO = BaseAPI.SENSITIVE_INFO + ("password",)
     IGNORED_ERROR_CODES = {
         #  Cancel e-waybill errors
@@ -57,7 +57,7 @@ class EWaybillAPI(BaseAPI):
         return super().post(params={"action": action}, json=json)
 
     def get_e_waybill(self, ewaybill_number):
-        return self.get("getewaybill", params={"ewbNo": ewaybill_number})
+        return self.get("GetEwayBill", params={"ewbNo": ewaybill_number})
 
     def get_e_waybills_by_date(self, date):
         return self.get("GetEwayBillsByDate", params={"date": date})

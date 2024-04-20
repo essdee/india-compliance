@@ -80,6 +80,7 @@
   "reconcile_on_thursday",
   "credentials_tab",
   "credentials",
+  "api_key",
   "api_secret",
   "gstn_public_certificate"
  ],
@@ -110,7 +111,6 @@
   {
    "fieldname": "api_secret",
    "fieldtype": "Password",
-   "hidden": 1,
    "label": "API Secret"
   },
   {
@@ -135,7 +135,6 @@
    "label": "Accounts"
   },
   {
-   "depends_on": "eval: india_compliance.is_api_enabled(doc)",
    "fieldname": "credentials_tab",
    "fieldtype": "Tab Break",
    "label": "Credentials"
@@ -560,12 +559,17 @@
    "fieldtype": "Check",
    "hidden": 1,
    "label": "Is Retry e-Invoice/e-Waybill Pending"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "API Key"
   }
  ],
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-03-21 19:36:00.878806",
+ "modified": "2024-04-16 19:01:08.798613",
  "modified_by": "Administrator",
  "module": "GST India",
  "name": "GST Settings",

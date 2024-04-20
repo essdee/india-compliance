@@ -10,13 +10,13 @@ from india_compliance.exceptions import GatewayTimeoutError, GSPServerError
 from india_compliance.gst_india.utils import is_api_enabled
 from india_compliance.gst_india.utils.api import enqueue_integration_request
 
-BASE_URL = "https://asp.resilient.tech"
+BASE_URL = "https://gsp.adaequare.com"
 
 
 class BaseAPI:
     API_NAME = "GST"
     BASE_PATH = ""
-    SENSITIVE_INFO = ("x-api-key",)
+    SENSITIVE_INFO = ("Authorization",)
 
     def __init__(self, *args, **kwargs):
         self.settings = frappe.get_cached_doc("GST Settings")
@@ -28,11 +28,9 @@ class BaseAPI:
             )
 
         self.sandbox_mode = self.settings.sandbox_mode
+        token = self.get_gsp_authentication_token()
         self.default_headers = {
-            "x-api-key": (
-                (self.settings.api_secret and self.settings.get_password("api_secret"))
-                or frappe.conf.ic_api_secret
-            )
+            "Authorization": f"Bearer {token}"
         }
         self.default_log_values = {}
 
@@ -72,7 +70,12 @@ class BaseAPI:
         if self.sandbox_mode:
             parts.insert(0, "test")
 
-        return urljoin(BASE_URL, "/".join(part.strip("/") for part in parts))
+        parts1 = []
+        for part in parts:
+            if part:
+               parts1.append(part.strip("/"))
+
+        return urljoin(BASE_URL, "/".join(parts1))
 
     def get(self, *args, **kwargs):
         return self._make_request("GET", *args, **kwargs)
@@ -274,6 +277,37 @@ class BaseAPI:
 
             if request_body and key in request_body:
                 request_body[key] = "*****"
+        
+    def get_gsp_authentication_token(self):
+        key = 'gsp_adaequare_token'
+
+        if cached_value := frappe.cache.get_value(key):
+            return cached_value
+
+        url = f"{BASE_URL}/gsp/authenticate?grant_type=token"
+        headers = {
+            "gspappid": self.settings.get_password("api_key"),
+            "gspappsecret": self.settings.get_password("api_secret")
+        }
+        auth_response = requests.request("POST", url, headers=headers, data={})
+        auth_response_json = auth_response.json()
+        if (auth_response.status_code != 200):
+            frappe.throw(
+                auth_response_json.get("message")
+                or frappe.as_json(auth_response_json, indent=4),
+                title=_("API Authentication Failed"),
+            )
+        bearer_token = auth_response_json.get("access_token")
+        expires_in = auth_response_json.get("expires_in") or 24*60*60
+        if not bearer_token:
+            frappe.throw(
+                "Authentication ERROR",
+                title=_("API Authentication Failed"),
+            )
+        
+        frappe.cache.set_value(key, bearer_token, expires_in_sec=expires_in)
+        
+        return bearer_token
 
 
 def get_public_ip():
