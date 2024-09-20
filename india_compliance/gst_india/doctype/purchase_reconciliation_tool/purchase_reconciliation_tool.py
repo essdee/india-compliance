@@ -1,7 +1,8 @@
 # Copyright (c) 2022, Resilient Tech and contributors
 # For license information, please see license.txt
-
 import json
+import re
+from collections import defaultdict
 from typing import List
 
 import frappe
@@ -10,6 +11,7 @@ from frappe.query_builder.functions import IfNull
 from frappe.utils import add_to_date, cint, now_datetime
 from frappe.utils.response import json_handler
 
+from india_compliance.gst_india.api_classes.taxpayer_base import TaxpayerBaseAPI
 from india_compliance.gst_india.constants import ORIGINAL_VS_AMENDED
 from india_compliance.gst_india.doctype.purchase_reconciliation_tool import (
     BaseUtil,
@@ -19,16 +21,15 @@ from india_compliance.gst_india.doctype.purchase_reconciliation_tool import (
     Reconciler,
 )
 from india_compliance.gst_india.utils import (
+    get_gstin_list,
     get_json_from_file,
     get_timespan_date_range,
     is_api_enabled,
 )
 from india_compliance.gst_india.utils.exporter import ExcelExporter
-from india_compliance.gst_india.utils.gstr import (
+from india_compliance.gst_india.utils.gstr_2 import (
     ACTIONS,
     IMPORT_CATEGORY,
-    GSTRCategory,
-    ReturnsAPI,
     ReturnType,
     download_gstr_2a,
     download_gstr_2b,
@@ -37,8 +38,7 @@ from india_compliance.gst_india.utils.gstr import (
 )
 
 STATUS_MAP = {
-    "Accept My Values": "Reconciled",
-    "Accept Supplier Values": "Reconciled",
+    "Accept": "Reconciled",
     "Pending": "Unreconciled",
     "Ignore": "Ignored",
 }
@@ -70,7 +70,9 @@ class PurchaseReconciliationTool(Document):
 
         self.set_onload(
             "has_missing_2b_documents",
-            has_missing_2b_documents(date_range, ReturnType.GSTR2B, self.company_gstin),
+            has_missing_2b_documents(
+                date_range, ReturnType.GSTR2B, self.company_gstin, self.company
+            ),
         )
 
     def validate(self):
@@ -103,16 +105,21 @@ class PurchaseReconciliationTool(Document):
 
     @frappe.whitelist()
     def download_gstr(
-        self, company_gstins, date_range, return_type=None, force=False, otp=None
+        self,
+        company_gstins,
+        date_range,
+        return_type=None,
+        force=False,
+        gst_categories=None,
     ):
         frappe.has_permission("Purchase Reconciliation Tool", "write", throw=True)
 
-        download_gstr(
+        return download_gstr(
             company_gstins=company_gstins,
             date_range=date_range,
             return_type=return_type,
             force=force,
-            otp=otp,
+            gst_categories=gst_categories,
         )
 
     @frappe.whitelist()
@@ -126,69 +133,36 @@ class PurchaseReconciliationTool(Document):
 
         return_type = ReturnType(return_type)
         periods = BaseUtil.get_periods(date_range, return_type, True)
-        history = get_import_history(company_gstin, return_type, periods)
 
-        columns = [
-            "Period",
-            "Classification",
-            "Status",
-            f"{'Downloaded' if for_download else 'Uploaded'} On",
-        ]
+        company_gstins = (
+            get_gstin_list(self.company) if company_gstin == "All" else [company_gstin]
+        )
 
-        settings = frappe.get_cached_doc("GST Settings")
+        history = get_import_history(company_gstins, return_type, periods)
+        history = {(log.return_period, log.gstin): log for log in history}
 
-        data = {}
+        action = "Download" if for_download else "Upload"
+        has_single_gstin = company_gstin != "All"
+
+        pending_download = defaultdict(set)
+        download_history = defaultdict(set)
+
         for period in periods:
-            # TODO: skip if today is not greater than 14th return period's next months
-            data[period] = []
-            status = "🟢 &nbsp; Downloaded"
-            for category in GSTRCategory:
-                if category.value == "ISDA" and return_type == ReturnType.GSTR2A:
-                    continue
+            for gst_no in company_gstins:
+                download_row = history.get((period, gst_no))
 
-                if (
-                    not settings.enable_overseas_transactions
-                    and category.value in IMPORT_CATEGORY
-                ):
-                    continue
+                if not download_row:
+                    pending_download[period].add(gst_no)
 
-                download = next(
-                    (
-                        log
-                        for log in history
-                        if log.return_period == period
-                        and log.classification in (category.value, "")
-                    ),
-                    None,
-                )
+                elif has_single_gstin:
+                    download_history[period].add(
+                        download_row.last_updated_on.strftime("%d-%m-%Y %H:%M:%S")
+                    )
 
-                status = "🟠 &nbsp; Not Downloaded"
-                if download:
-                    status = "🟢 &nbsp; Downloaded"
-                    if download.data_not_found:
-                        status = "🔵 &nbsp; Data Not Found"
-                    if download.request_id:
-                        status = "🔵 &nbsp; Queued"
-
-                if not for_download:
-                    status = status.replace("Downloaded", "Uploaded")
-
-                _dict = {
-                    "Classification": (
-                        category.value if return_type is ReturnType.GSTR2A else "ALL"
-                    ),
-                    "Status": status,
-                    columns[-1]: (
-                        "✅ &nbsp;"
-                        + download.last_updated_on.strftime("%d-%m-%Y %H:%M:%S")
-                        if download
-                        else ""
-                    ),
-                }
-                if _dict not in data[period]:
-                    data[period].append(_dict)
-
-        return {"columns": columns, "data": data}
+        return {
+            "pending_download": (pending_download or f"No Pending {action}s"),
+            "download_history": (download_history or f"No {action} History"),
+        }
 
     @frappe.whitelist()
     def get_return_period_from_file(self, return_type, file_path):
@@ -229,7 +203,9 @@ class PurchaseReconciliationTool(Document):
 
         self.set_onload(
             "has_missing_2b_documents",
-            has_missing_2b_documents(date_range, ReturnType.GSTR2B, self.company_gstin),
+            has_missing_2b_documents(
+                date_range, ReturnType.GSTR2B, self.company_gstin, self.company
+            ),
         )
 
         return date_range
@@ -463,43 +439,59 @@ def download_gstr(
     date_range,
     return_type=None,
     force=False,
-    otp=None,
     gst_categories=None,
 ):
     if return_type:
         return_type = ReturnType(return_type)
 
+    otp_failures = []
+
     for company_gstin in company_gstins:
         try:
             if not return_type or return_type == ReturnType.GSTR2A:
-                _download_gstr_2a(date_range, company_gstin, force, otp, gst_categories)
+                error = download_pending_gstr_2a(
+                    date_range, company_gstin, force, gst_categories
+                )
 
             if not return_type or return_type == ReturnType.GSTR2B:
-                _download_gstr_2b(date_range, company_gstin, otp)
+                error = download_pending_gstr_2b(date_range, company_gstin)
+
+            if error:
+                otp_failures.append(error)
+
         except Exception:
             frappe.log_error(
                 frappe.get_traceback(),
                 f"Error while downloading {return_type.value if return_type else 'GSTR 2A & 2B'} for {company_gstin} ",
             )
 
+    return otp_failures
 
-def _download_gstr_2a(
-    date_range, company_gstin, force=False, otp=None, gst_categories=None
+
+def download_pending_gstr_2a(
+    date_range, company_gstin, force=False, gst_categories=None
 ):
     return_type = ReturnType.GSTR2A
     periods = BaseUtil.get_periods(date_range, return_type)
     if not force:
         periods = get_periods_to_download(company_gstin, return_type, periods)
 
-    return download_gstr_2a(company_gstin, periods, otp, gst_categories)
+    if not periods:
+        return
+
+    return download_gstr_2a(company_gstin, periods, gst_categories)
 
 
-def _download_gstr_2b(date_range, company_gstin, otp=None):
+def download_pending_gstr_2b(date_range, company_gstin):
     return_type = ReturnType.GSTR2B
     periods = get_periods_to_download(
         company_gstin, return_type, BaseUtil.get_periods(date_range, return_type)
     )
-    return download_gstr_2b(company_gstin, periods, otp)
+
+    if not periods:
+        return
+
+    return download_gstr_2b(company_gstin, periods)
 
 
 def get_periods_to_download(company_gstin, return_type, periods):
@@ -514,7 +506,12 @@ def get_periods_to_download(company_gstin, return_type, periods):
 
 
 def get_import_history(
-    company_gstin, return_type: ReturnType, periods: List[str], fields=None, pluck=None
+    company_gstins: list | str,
+    return_type: ReturnType,
+    periods: List[str],
+    *,
+    fields=None,
+    pluck=None,
 ):
     if not (fields or pluck):
         fields = (
@@ -523,12 +520,16 @@ def get_import_history(
             "data_not_found",
             "last_updated_on",
             "request_id",
+            "gstin",
         )
+
+    if isinstance(company_gstins, str):
+        company_gstins = [company_gstins]
 
     return frappe.db.get_all(
         "GSTR Import Log",
         filters={
-            "gstin": company_gstin,
+            "gstin": ("in", company_gstins),
             "return_type": return_type.value,
             "return_period": ("in", periods),
         },
@@ -537,21 +538,28 @@ def get_import_history(
     )
 
 
-def has_missing_2b_documents(date_range, return_type: ReturnType, company_gstin):
+def has_missing_2b_documents(
+    date_range, return_type: ReturnType, company_gstin, company
+):
     periods = BaseUtil.get_periods(date_range, return_type, True)
 
     if not periods:
         return False
 
-    history = get_import_history(company_gstin, return_type, periods)
+    company_gstins = (
+        get_gstin_list(company) if company_gstin == "All" else [company_gstin]
+    )
+    history = get_import_history(company_gstins, return_type, periods)
+    history = {(log.return_period, log.gstin): log for log in history}
 
     if not history:
         return True
 
-    for period in periods:
-        download = next((log for log in history if log.return_period == period), None)
-        if not download or download.data_not_found or download.request_id:
-            return True
+    for gstin in company_gstins:
+        for period in periods:
+            download = history.get((period, gstin))
+            if not download or download.data_not_found or download.request_id:
+                return True
 
     return False
 
@@ -603,11 +611,11 @@ def parse_params(fun):
 
 
 def auto_refresh_authtoken():
-    is_auto_refresh_enabled = frappe.db.get_single_value(
-        "GST Settings", "auto_refresh_auth_token"
+    enable_auto_reconciliation = frappe.get_cached_value(
+        "GST Settings", "GST Settings", "enable_auto_reconciliation"
     )
 
-    if not is_auto_refresh_enabled:
+    if not enable_auto_reconciliation:
         return
 
     for credential in frappe.get_all(
@@ -621,7 +629,7 @@ def auto_refresh_authtoken():
         if credential.session_key and credential.session_expiry < add_to_date(
             now_datetime(), minutes=10
         ):
-            api = ReturnsAPI(credential.gstin)
+            api = TaxpayerBaseAPI(credential.gstin)
             response = api.refresh_auth_token()
             api.process_response(response)
 
@@ -772,6 +780,8 @@ class BuildExcel:
             filters=self.filters,
             headers=self.match_summary_header,
             data=self.get_match_summary_data(),
+            default_data_format={"bg_color": self.COLOR_PALLATE.light_gray},
+            default_header_format={"bg_color": self.COLOR_PALLATE.dark_gray},
         )
 
         if not self.is_supplier_specific:
@@ -780,6 +790,8 @@ class BuildExcel:
                 filters=self.filters,
                 headers=self.supplier_header,
                 data=self.get_supplier_data(),
+                default_data_format={"bg_color": self.COLOR_PALLATE.light_gray},
+                default_header_format={"bg_color": self.COLOR_PALLATE.dark_gray},
             )
 
         excel.create_sheet(
@@ -788,6 +800,8 @@ class BuildExcel:
             merged_headers=self.get_merge_headers(),
             headers=self.invoice_header,
             data=self.get_invoice_data(),
+            default_data_format={"bg_color": self.COLOR_PALLATE.light_gray},
+            default_header_format={"bg_color": self.COLOR_PALLATE.dark_gray},
         )
 
         excel.remove_sheet("Sheet")
@@ -849,8 +863,8 @@ class BuildExcel:
             prefix="inward_supply",
         )
 
-        # TODO: Sanitize supplier name and gstin
-        self.supplier_name = data[0].get("supplier_name")
+        # remove special characters (not allowed in excel sheet name)
+        self.supplier_name = re.sub(r"[<>[\]?:|*]", "", data[0].get("supplier_name"))
         self.supplier_gstin = data[0].get("supplier_gstin")
 
         return self.process_data(data, self.invoice_header)

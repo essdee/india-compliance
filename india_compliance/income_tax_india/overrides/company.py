@@ -28,7 +28,9 @@ def create_tds_account(company):
 def create_or_update_tax_withholding_category(company):
     accounts = []
     tds_account = frappe.get_value(
-        "Account", {"account_name": "TDS Payable", "company": company}, "name"
+        "Account",
+        {"account_name": "TDS Payables", "company": company, "is_group": 0},
+        "name",
     )
 
     if company and tds_account:
@@ -98,6 +100,9 @@ def get_tds_category_details(accounts):
         )
     )
     for rule in tds_rules:
+        rates = get_prospective_tds_rates(rule["rates"])
+        if not rates:
+            continue
         tds_details.append(
             {
                 "name": rule.get("name"),
@@ -111,7 +116,7 @@ def get_tds_category_details(accounts):
                     "consider_party_ledger_amount"
                 ),
                 "tax_on_excess_amount": rule.get("tax_on_excess_amount"),
-                "rates": get_prospective_tds_rates(rule["rates"]),
+                "rates": rates,
             }
         )
 

@@ -49,8 +49,15 @@ frappe.ui.form.on("Sales Invoice", {
                     frappe.call({
                         method: "india_compliance.gst_india.utils.e_invoice.generate_e_invoice",
                         args: { docname: frm.doc.name, force: true },
-                        callback: () => {
-                            return frm.refresh();
+                        callback: async (r) => {
+                            if (r.message?.error_type == "otp_requested") {
+                                await india_compliance.authenticate_otp(frm.doc.company_gstin);
+                                await frappe.call({
+                                    method: "india_compliance.gst_india.utils.e_invoice.handle_duplicate_irn_error",
+                                    args: r.message
+                                });
+                            }
+                            frm.refresh();
                         },
                     });
                 },
@@ -154,8 +161,8 @@ function show_cancel_e_invoice_dialog(frm, callback) {
             : __("Cancel e-Invoice"),
         fields: get_cancel_e_invoice_dialog_fields(frm),
         primary_action_label: frm.doc.ewaybill
-            ? __("Cancel IRN & e-Waybill")
-            : __("Cancel IRN"),
+            ? __("Cancel IRN, e-Waybill & Invoice")
+            : __("Cancel IRN & Invoice"),
         primary_action(values) {
             frappe.call({
                 method: "india_compliance.gst_india.utils.e_invoice.cancel_e_invoice",
@@ -174,6 +181,12 @@ function show_cancel_e_invoice_dialog(frm, callback) {
 
     india_compliance.primary_to_danger_btn(d);
     d.show();
+
+    $(`
+        <div class="alert alert-warning" role="alert">
+            Sales invoice will be cancelled along with the IRN.
+        </div>
+    `).prependTo(d.wrapper);
 }
 
 function show_mark_e_invoice_as_cancelled_dialog(frm) {

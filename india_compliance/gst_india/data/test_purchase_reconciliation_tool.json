@@ -37,7 +37,7 @@
                     "classification": "IMPG",
                     "doc_type": "Bill of Entry",
                     "supply_type": "",
-                    "place_of_supply": "24-Gujarat",
+                    "place_of_supply": null,
                     "items": [
                         {
                             "taxable_value": 10000,
@@ -72,11 +72,21 @@
             {
                 "PURCHASE_INVOICE": {
                     "bill_no": "BILL-23-00010",
-                    "company_gstin": "29AABCR1718E1ZL"
+                    "company_gstin": "29AABCR1718E1ZL",
+                    "is_in_state": 0,
+                    "is_out_state": 1
                 },
                 "INWARD_SUPPLY": {
                     "bill_no": "BILL-23-00010",
-                    "company_gstin": "29AABCR1718E1ZL"
+                    "company_gstin": "29AABCR1718E1ZL",
+                    "place_of_supply": "29-Karnataka",
+                    "items": [
+                        {
+                            "taxable_value": 10000,
+                            "rate": 18,
+                            "igst": 1800
+                        }
+                    ]
                 },
                 "RECONCILED_DATA": {
                     "action": "No Action",
@@ -100,17 +110,17 @@
         "TEST_DIFFERENT_COMPANY_GSTIN_MISMATCH": [
             {
                 "PURCHASE_INVOICE": {
-                    "bill_no": "BILL-23-00021",
+                    "bill_no": "BILLXYZ-23-00021",
                     "company_gstin": "24AAQCA8719H1ZC"
                 },
                 "INWARD_SUPPLY": {
-                    "bill_no": "BILL-23-00021",
+                    "bill_no": "BILLXYZ-23-00021",
                     "company_gstin": "29AABCR1718E1ZL"
                 },
                 "RECONCILED_DATA": {
                     "action": "No Action",
                     "bill_date": "2023-12-11",
-                    "bill_no": "BILL-23-00021",
+                    "bill_no": "BILLXYZ-23-00021",
                     "classification": "B2B",
                     "differences": "COMPANY_GSTIN",
                     "inward_supply_company_gstin": "29AABCR1718E1ZL",

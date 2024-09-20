@@ -173,7 +173,7 @@ class TestEInvoice(FrappeTestCase):
 
         total_item_wise_cgst = sum(row["CgstAmt"] for row in e_invoice_data.item_list)
         self.assertEqual(
-            si.taxes[0].tax_amount,
+            si.taxes[0].base_tax_amount_after_discount_amount,
             total_item_wise_cgst,
         )
 
@@ -769,7 +769,7 @@ class TestEInvoice(FrappeTestCase):
         # Assert if Invoice amount has changed
         self.assertRaisesRegex(
             frappe.ValidationError,
-            re.compile(r"^(e-Invoice is already available against Invoice.*)$"),
+            re.compile(r"^(An e-Invoice already exists for Invoice.*)$"),
             generate_e_invoice,
             si.name,
         )

@@ -1,4 +1,3 @@
-const TCS_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[C]{1}[0-9A-Z]{1}$/;
 const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
 
 function update_gstin_in_other_documents(doctype) {
@@ -58,14 +57,6 @@ function validate_gstin(doctype) {
                 frappe.throw(__("GSTIN/UIN should be 15 characters long"));
             }
 
-            if (TCS_REGEX.test(gstin)) {
-                frappe.throw(
-                    __(
-                        "e-Commerce Operator (TCS) GSTIN is not allowed to be set in Party/Address"
-                    )
-                );
-            }
-
             gstin = india_compliance.validate_gstin(gstin);
 
             frm.doc.gstin = gstin;
@@ -79,6 +70,10 @@ function validate_gstin(doctype) {
             if (PAN_REGEX.test(pan)) {
                 frm.doc.pan = pan;
                 frm.refresh_field("pan");
+                set_party_type(frm);
+                if(doctype != "Address"){
+                    india_compliance.set_pan_status(frm.get_field("pan"));
+                }
             }
         },
     });
@@ -102,6 +97,7 @@ function validate_pan(doctype) {
 
             frm.doc.pan = pan;
             frm.refresh_field("pan");
+            set_party_type(frm);
         },
     });
 }
@@ -137,6 +133,17 @@ function set_gstin_options_and_status(doctype) {
     });
 }
 
+function set_pan_status(doctype) {
+    frappe.ui.form.on(doctype, {
+        refresh(frm) {
+            india_compliance.set_pan_status(frm.get_field("pan"));
+        },
+        pan(frm) {
+            india_compliance.set_pan_status(frm.get_field("pan"));
+        },
+    });
+}
+
 async function set_gstin_options(frm) {
     if (frm.is_new() || frm._gstin_options_set_for === frm.doc.name) return;
 
@@ -155,4 +162,14 @@ function set_gst_category(doctype) {
             );
         },
     });
+}
+
+function set_party_type(frm) {
+    if (!["Customer", "Supplier"].includes(frm.doc.doctype)) return;
+    pan_to_party_type_map = {
+        F: "Partnership",
+        C: "Company",
+    };
+    party_type = frm.doc.doctype === "Customer" ? "customer_type" : "supplier_type";
+    frm.set_value(party_type, pan_to_party_type_map[frm.doc.pan[3]] || "Individual");
 }

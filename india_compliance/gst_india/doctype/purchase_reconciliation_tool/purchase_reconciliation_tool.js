@@ -10,6 +10,7 @@ const tooltip_info = {
 };
 
 const api_enabled = india_compliance.is_api_enabled();
+const GST_CATEGORIES = ["B2B", "B2BA", "CDNR", "CDNRA", "ISD", "IMPG", "IMPGSEZ"];
 const ALERT_HTML = `
     <div class="gstr2b-alert alert alert-primary fade show d-flex align-items-center justify-content-between border-0" role="alert">
         <div>
@@ -17,15 +18,9 @@ const ALERT_HTML = `
         </div>
         ${
             api_enabled
-                ? `<button
-                id="download-gstr2b-button"
-                type="button"
-                class="btn btn-dark btn-xs"
-                aria-label="Download"
-                style="outline: 0px solid black !important"
-            >
-                Download 2B
-            </button>`
+                ? `<a id="download-gstr2b-button" href="#" class="alert-link">
+                    Download 2B
+                </a>`
                 : ""
         }
     </div>
@@ -73,18 +68,21 @@ frappe.ui.form.on("Purchase Reconciliation Tool", {
         new india_compliance.quick_info_popover(frm, tooltip_info);
 
         await frappe.require("purchase_reconciliation_tool.bundle.js");
+        frm.trigger("company");
         frm.purchase_reconciliation_tool = new PurchaseReconciliationTool(frm);
     },
 
     onload(frm) {
         if (frm.doc.is_modified) frm.doc.reconciliation_data = null;
-        frm.trigger("company");
         add_gstr2b_alert(frm);
+
+        frm.trigger("purchase_period");
+        frm.trigger("inward_supply_period");
     },
 
     async company(frm) {
         if (!frm.doc.company) return;
-        const options = await set_gstin_options(frm);
+        const options = await india_compliance.set_gstin_options(frm, true);
 
         if (!frm.doc.company_gstin) frm.set_value("company_gstin", options[0]);
     },
@@ -92,7 +90,12 @@ frappe.ui.form.on("Purchase Reconciliation Tool", {
     refresh(frm) {
         // Primary Action
         frm.disable_save();
-        frm.page.set_primary_action(__("Reconcile"), () => frm.save());
+        frm.page.set_primary_action(__("Reconcile"), () => {
+            if (!frm.doc.company && !frm.doc.company_gstin) {
+                frappe.throw(__('Please provide either a Company name or Company GSTIN.'));
+            }
+            frm.save();
+        });
 
         // add custom buttons
         api_enabled
@@ -111,7 +114,7 @@ frappe.ui.form.on("Purchase Reconciliation Tool", {
             );
             frm.add_custom_button(__("dropdown-divider"), () => {}, __("Actions"));
         }
-        ["Accept My Values", "Accept Supplier Values", "Pending", "Ignore"].forEach(
+        ["Accept", "Pending", "Ignore"].forEach(
             action =>
                 frm.add_custom_button(
                     __(action),
@@ -141,8 +144,9 @@ frappe.ui.form.on("Purchase Reconciliation Tool", {
         frm.doc.reconciliation_data = null;
     },
 
-    purchase_period(frm) {
-        fetch_date_range(frm, "purchase");
+    async purchase_period(frm) {
+        await fetch_date_range(frm, "purchase");
+        set_date_range_description(frm, "purchase");
     },
 
     async inward_supply_period(frm) {
@@ -151,8 +155,17 @@ frappe.ui.form.on("Purchase Reconciliation Tool", {
             "inward_supply",
             "get_date_range_and_check_missing_documents"
         );
+        set_date_range_description(frm, "inward_supply");
         add_gstr2b_alert(frm);
+    },
 
+    async company_gstin(frm) {
+        await fetch_date_range(
+            frm,
+            "inward_supply",
+            "get_date_range_and_check_missing_documents"
+        );
+        add_gstr2b_alert(frm);
     },
 
     after_save(frm) {
@@ -340,8 +353,7 @@ class PurchaseReconciliationTool {
                 fieldtype: "Select",
                 options: [
                     "No Action",
-                    "Accept My Values",
-                    "Accept Supplier Values",
+                    "Accept",
                     "Ignore",
                     "Pending",
                 ],
@@ -744,8 +756,8 @@ class PurchaseReconciliationTool {
             {
                 label: "Purchase <br>Invoice",
                 fieldname: "purchase_invoice_name",
-                fieldtype: "Link",
-                doctype: "Purchase Invoice",
+                fieldtype: "Dynamic Link",
+                options: "purchase_doctype",
                 align: "center",
                 width: 120,
             },
@@ -970,8 +982,7 @@ class DetailViewDialog {
         else
             actions.push(
                 "Unlink",
-                "Accept My Values",
-                "Accept Supplier Values",
+                "Accept",
                 "Pending"
             );
 
@@ -1021,8 +1032,7 @@ class DetailViewDialog {
         if (action == "Ignore") return "btn-secondary";
         if (action == "Create") return "btn-primary not-grey";
         if (action == "Link") return "btn-primary not-grey btn-link disabled";
-        if (action == "Accept My Values") return "btn-primary not-grey";
-        if (action == "Accept Supplier Values") return "btn-primary not-grey";
+        if (action == "Accept") return "btn-primary not-grey";
     }
 
     toggle_link_btn(disabled) {
@@ -1119,6 +1129,10 @@ class ImportDialog {
     }
 
     init_dialog() {
+        if (!this.frm.doc.company) {
+            frappe.throw(__("Please select a Company first!"));
+        }
+
         if (this.for_download) this._init_download_dialog();
         else this._init_upload_dialog();
 
@@ -1131,7 +1145,12 @@ class ImportDialog {
     _init_download_dialog() {
         this.dialog = new frappe.ui.Dialog({
             title: __("Download Data from GSTN"),
-            fields: [...this.get_gstr_fields(), ...this.get_history_fields()],
+            fields: [
+                ...this.get_gstr_fields(),
+                ...this.get_2a_category_fields(),
+                ...this.get_fields_for_pending_downloads(),
+                ...this.get_fields_for_download_history(),
+            ],
         });
     }
 
@@ -1161,7 +1180,8 @@ class ImportDialog {
                         this.update_return_period();
                     },
                 },
-                ...this.get_history_fields(),
+                ...this.get_fields_for_pending_downloads(),
+                ...this.get_fields_for_download_history(),
             ],
         });
 
@@ -1173,18 +1193,32 @@ class ImportDialog {
             if (this.return_type === ReturnType.GSTR2A) {
                 this.dialog.$wrapper.find(".btn-secondary").removeClass("hidden");
                 this.dialog.set_primary_action(__("Download All"), () => {
-                    download_gstr(this.frm, this.date_range, this.return_type, this.company_gstin, false);
-                    this.dialog.hide();
+                    this.download_gstr_by_category(false);
                 });
                 this.dialog.set_secondary_action_label(__("Download Missing"));
                 this.dialog.set_secondary_action(() => {
-                    download_gstr(this.frm, this.date_range, this.return_type, this.company_gstin, true);
-                    this.dialog.hide();
+                    this.download_gstr_by_category(true);
                 });
             } else if (this.return_type === ReturnType.GSTR2B) {
                 this.dialog.$wrapper.find(".btn-secondary").addClass("hidden");
                 this.dialog.set_primary_action(__("Download"), () => {
-                    download_gstr(this.frm, this.date_range, this.return_type, this.company_gstin, true);
+                    if (this.has_no_pending_download) {
+                        frappe.msgprint({
+                            message:
+                                "There are no pending downloads for the selected period. GSTR2B is static and does not require redownload.",
+                            title: "No Pending Downloads",
+                            indicator: "orange",
+                        });
+                        return;
+                    }
+
+                    download_gstr(
+                        this.frm,
+                        this.date_range,
+                        this.return_type,
+                        this.company_gstin,
+                        true
+                    );
                     this.dialog.hide();
                 });
             }
@@ -1205,7 +1239,28 @@ class ImportDialog {
         }
     }
 
+    download_gstr_by_category(only_missing) {
+        const marked_gst_categories = GST_CATEGORIES.filter(
+            category => this.dialog.fields_dict[category].value === 1
+        );
+        if (marked_gst_categories.length === 0) {
+            frappe.throw(__("Please select at least one Category to Download"));
+        }
+        download_gstr(
+            this.frm,
+            this.date_range,
+            this.return_type,
+            this.company_gstin,
+            only_missing,
+            marked_gst_categories
+        );
+        this.dialog.hide();
+    }
+
     async fetch_import_history() {
+        if (!this.company_gstin) return;
+
+        // fetch history
         const { message } = await this.frm.call("get_import_history", {
             company_gstin: this.company_gstin,
             return_type: this.return_type,
@@ -1213,11 +1268,28 @@ class ImportDialog {
             for_download: this.for_download,
         });
 
-        // TODO: modify HTML for case: company_gstin == "All"
-        if (!message || this.company_gstin == "All") return;
-        this.dialog.fields_dict.history.html(
-            frappe.render_template("gstr_download_history", message)
+        // render html
+        let pending_download = {
+            columns: ["Period", "GSTIN"],
+            data: message.pending_download,
+        };
+        this.dialog.fields_dict.pending_download.html(
+            frappe.render_template("gstr_download_history", pending_download)
         );
+
+        let download_history = {
+            columns: ["Period", "Downloded On"],
+            data: message.download_history,
+        };
+        let html =
+            this.company_gstin === "All"
+                ? ""
+                : frappe.render_template("gstr_download_history", download_history);
+
+        this.dialog.fields_dict.history.html(html);
+
+        // flag
+        this.has_no_pending_download = typeof message.pending_download == "string";
     }
 
     async update_return_period() {
@@ -1262,9 +1334,9 @@ class ImportDialog {
                     { label: "GSTR 2B", value: ReturnType.GSTR2B },
                 ],
                 onchange: () => {
+                    this.return_type = this.dialog.get_value("return_type");
                     this.fetch_import_history();
                     this.setup_dialog_actions();
-                    this.return_type = this.dialog.get_value("return_type");
                 },
             },
             {
@@ -1284,7 +1356,7 @@ class ImportDialog {
                 onchange: () => {
                     this.company_gstin = this.dialog.get_value("company_gstin");
                     this.fetch_import_history();
-                }
+                },
             },
             {
                 fieldtype: "Column Break",
@@ -1321,11 +1393,56 @@ class ImportDialog {
         ];
     }
 
-    get_history_fields() {
-        const label = this.for_download ? "Download History" : "Upload History";
+    get_2a_category_fields() {
+        const fields = [];
+        const section_field = {
+            fieldtype: "Section Break",
+            depends_on: "eval:doc.return_type == 'GSTR2a'",
+        };
+
+        const import_categories = ["IMPG", "IMPGSEZ"];
+        const rare_categories = ["ISD"];
+        const overseas_enabled = gst_settings.enable_overseas_transactions;
+
+        fields.push(section_field);
+        GST_CATEGORIES.forEach((category, i) => {
+            let default_check = true;
+            if (rare_categories.includes(category)) default_check = false;
+            else if (import_categories.includes(category) && !overseas_enabled)
+                default_check = false;
+
+            fields.push({
+                label: category,
+                fieldname: category,
+                fieldtype: "Check",
+                default: default_check,
+            });
+
+            // after every 4 fields section break
+            if (i % 4 === 3) fields.push({ ...section_field, hide_border: true });
+            else fields.push({ fieldtype: "Column Break" });
+        });
+
+        return fields;
+    }
+
+    get_fields_for_pending_downloads() {
+        const label = this.for_download ? "🟠 Pending Download" : "🟠 Pending Upload";
+        return [
+            { label, fieldtype: "Section Break", depends_on: "eval:doc.company_gstin" },
+            { label, fieldname: "pending_download", fieldtype: "HTML" },
+        ];
+    }
+
+    get_fields_for_download_history() {
+        const label = this.for_download ? "🟢 Download History" : "🟢 Upload History";
 
         return [
-            { label, fieldtype: "Section Break" },
+            {
+                label,
+                fieldtype: "Section Break",
+                depends_on: "eval:doc.company_gstin && doc.company_gstin != 'All'",
+            },
             { label, fieldname: "history", fieldtype: "HTML" },
         ];
     }
@@ -1337,7 +1454,7 @@ async function download_gstr(
     return_type,
     company_gstin,
     only_missing = true,
-    otp = null
+    gst_categories = null
 ) {
     const authenticated_company_gstins =
         await india_compliance.authenticate_company_gstins(
@@ -1350,10 +1467,26 @@ async function download_gstr(
         company_gstins: authenticated_company_gstins,
         date_range: date_range,
         force: !only_missing,
-        otp,
+        gst_categories,
     };
     frm.events.show_progress(frm, "download");
-    await frm.call("download_gstr", args);
+
+    const { message } = await frm.call("download_gstr", args);
+
+    if (message && message.length) {
+        // TODO: Setup Listners similar to GSTR-1 Beta
+        message.forEach(async msg => {
+            await india_compliance.authenticate_otp(msg.gstin, msg.error_type);
+            download_gstr(
+                frm,
+                date_range,
+                return_type,
+                msg.gstin,
+                only_missing,
+                gst_categories
+            );
+        });
+    }
 }
 
 class EmailDialog {
@@ -1432,14 +1565,31 @@ class EmailDialog {
 async function fetch_date_range(frm, field_prefix, method) {
     const from_date_field = field_prefix + "_from_date";
     const to_date_field = field_prefix + "_to_date";
+
     const period = frm.doc[field_prefix + "_period"];
-    if (!period) return;
+    if (!period || period == "Custom") return;
 
     const { message } = await frm.call(method || "get_date_range", { period });
-    if (!message) return;
 
     frm.set_value(from_date_field, message[0]);
     frm.set_value(to_date_field, message[1]);
+}
+
+function set_date_range_description(frm, field_prefixs) {
+    if (!field_prefixs) field_prefixs = ["inward_supply", "purchase"];
+    else field_prefixs = [field_prefixs];
+
+    field_prefixs.forEach(prefix => {
+        const period_field = prefix + "_period";
+        const period = frm.doc[period_field];
+
+        if (!period || period == "Custom")
+            return frm.get_field(period_field).set_description("");
+
+        const from_date = frappe.datetime.str_to_user(frm.doc[prefix + "_from_date"]);
+        const to_date = frappe.datetime.str_to_user(frm.doc[prefix + "_to_date"]);
+        frm.get_field(period_field).set_description(`${from_date} to ${to_date}`);
+    });
 }
 
 function get_icon(value, column, data, icon) {
@@ -1701,19 +1851,4 @@ async function create_new_purchase_invoice(row, company, company_gstin) {
     };
 
     frappe.new_doc("Purchase Invoice");
-}
-
-async function set_gstin_options(frm) {
-    const { query, params } = india_compliance.get_gstin_query(frm.doc.company);
-    const { message } = await frappe.call({
-        method: query,
-        args: params,
-    });
-
-    if (!message) return [];
-    message.unshift("All");
-
-    const gstin_field = frm.get_field("company_gstin");
-    gstin_field.set_data(message);
-    return message;
 }

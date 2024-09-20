@@ -8,6 +8,7 @@ update_gstin_in_other_documents(DOCTYPE);
 show_overseas_disabled_warning(DOCTYPE);
 set_gstin_options_and_status(DOCTYPE);
 set_gst_category(DOCTYPE);
+set_pan_status(DOCTYPE)
 
 frappe.ui.form.on(DOCTYPE, {
     gstin(frm) {
@@ -23,13 +24,6 @@ frappe.ui.form.on(DOCTYPE, {
     },
 
     gst_transporter_id(frm) {
-        if (
-            !frm.doc.gst_transporter_id ||
-            frm.doc.gst_transporter_id.length < 15
-        )
-            return;
-
-        gst_transporter_id_field = frm.get_field("gst_transporter_id");
-        india_compliance.set_gstin_status(gst_transporter_id_field);
+        india_compliance.validate_gst_transporter_id(frm.doc.gst_transporter_id);
     },
 });

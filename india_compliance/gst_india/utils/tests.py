@@ -52,12 +52,6 @@ def create_transaction(**data):
         if not transaction.supplier:
             transaction.supplier = "_Test Registered Supplier"
 
-        if (
-            transaction.doctype == "Purchase Invoice"
-            and not transaction.itc_classification
-        ):
-            transaction.itc_classification = "All Other ITC"
-
     if transaction.doctype == "POS Invoice":
         transaction.append(
             "payments",
@@ -113,6 +107,7 @@ def append_item(transaction, data=None, company_abbr="_TIRC"):
             "gst_hsn_code": data.gst_hsn_code,
             "warehouse": f"Stores - {company_abbr}",
             "expense_account": f"Cost of Goods Sold - {company_abbr}",
+            "taxable_value": data.taxable_value or 0,
         },
     )
 
@@ -153,6 +148,9 @@ def _append_taxes(
             tax["tax_amount"] = tax_amount
 
         if account.endswith("RCM"):
-            tax["add_deduct_tax"] = "Deduct"
+            if transaction.doctype in SALES_DOCTYPES:
+                tax["rate"] = -tax["rate"]
+            else:
+                tax["add_deduct_tax"] = "Deduct"
 
         transaction.append("taxes", tax)

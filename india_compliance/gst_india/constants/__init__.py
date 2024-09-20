@@ -16,8 +16,13 @@ GST_ACCOUNT_FIELDS = (
 
 GST_TAX_TYPES = tuple(field[:-8] for field in GST_ACCOUNT_FIELDS)
 
+GST_RCM_TAX_TYPES = tuple(tax_type + "_rcm" for tax_type in GST_TAX_TYPES)
+
+TAX_TYPES = (*GST_TAX_TYPES, *GST_RCM_TAX_TYPES)
+
 GST_PARTY_TYPES = ("Customer", "Supplier", "Company")
 
+# Map for e-Invoice Supply Type
 GST_CATEGORIES = {
     "Registered Regular": "B2B",
     "Registered Composition": "B2B",
@@ -27,6 +32,8 @@ GST_CATEGORIES = {
     "Deemed Export": "DEXP",
     "UIN Holders": "B2B",
     "Tax Deductor": "B2B",
+    "Tax Collector": "B2B",
+    "Input Service Distributor": "B2B",
 }
 
 EXPORT_TYPES = (
@@ -1392,6 +1399,7 @@ OVERSEAS = re.compile(rf"{NRI_ID}|{OIDAR}")
 
 UNBODY = re.compile(r"^[0-9]{4}[A-Z]{3}[0-9]{5}[UO]{1}[N][A-Z0-9]{1}$")
 TDS = re.compile(r"^[0-9]{2}[A-Z]{4}[A-Z0-9]{1}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[D][0-9A-Z]$")
+TCS = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[C]{1}[0-9A-Z]{1}$")
 
 GSTIN_FORMATS = {
     "Registered Regular": REGISTERED,
@@ -1401,9 +1409,10 @@ GSTIN_FORMATS = {
     "Deemed Export": REGISTERED,
     "UIN Holders": UNBODY,
     "Tax Deductor": TDS,
+    "Tax Collector": TCS,
+    "Input Service Distributor": REGISTERED,
 }
 
-TCS = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[C]{1}[0-9A-Z]{1}$")
 PAN_NUMBER = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]{1}$")
 PINCODE_FORMAT = re.compile(r"^[1-9][0-9]{5}$")
 
@@ -1416,6 +1425,11 @@ DISTANCE_REGEX = re.compile(r"\d+")
 
 INVOICE_DOCTYPES = {"Sales Invoice", "Purchase Invoice"}
 SALES_DOCTYPES = set(sales_doctypes)
+SUBCONTRACTING_DOCTYPES = (
+    "Subcontracting Order",
+    "Subcontracting Receipt",
+    "Stock Entry",
+)
 
 BUG_REPORT_URL = "https://github.com/resilient-tech/india-compliance/issues/new"
 

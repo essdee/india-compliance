@@ -5,6 +5,7 @@ import requests
 import frappe
 from frappe import _
 from frappe.utils import sbool
+from frappe.utils.scheduler import is_scheduler_disabled
 
 from india_compliance.exceptions import GatewayTimeoutError, GSPServerError
 from india_compliance.gst_india.utils import is_api_enabled
@@ -63,6 +64,10 @@ class BaseAPI:
 
     def get_url(self, *parts):
         parts = list(parts)
+
+        # If the first part is a URL, return it as it is
+        if parts and parts[0].startswith("https"):
+            return parts[0]
 
         if self.BASE_PATH:
             parts.insert(0, self.BASE_PATH)
@@ -157,6 +162,10 @@ class BaseAPI:
                     )
 
             response_json = self.process_response(response_json)
+
+            if response_json.get("error_type") == "invalid_public_key":
+                return self._make_request(method, endpoint, params, headers, json)
+
             return response_json.get("result", response_json)
 
         except Exception as e:
@@ -220,7 +229,6 @@ class BaseAPI:
         pass
 
     def handle_http_code(self, status_code, response_json):
-        # TODO: add link to account page / support email
 
         # GSP connectivity issues
         if status_code == 401 or (
@@ -229,10 +237,9 @@ class BaseAPI:
             and response_json.get("error") == "access_denied"
         ):
             frappe.throw(
-                _("Error establishing connection to GSP. Please contact {0}.").format(
-                    _("your Service Provider")
-                    if frappe.conf.ic_api_key
-                    else _("India Compliance API Support")
+                _(
+                    "Error establishing connection to GSP. Please contact India"
+                    " Compliance API support at <strong>api-support@indiacompliance.app</strong>."
                 ),
                 title=_("GSP Connection Error"),
             )
@@ -322,7 +329,7 @@ def check_scheduler_status():
     if frappe.flags.in_test or frappe.conf.developer_mode:
         return
 
-    if frappe.utils.scheduler.is_scheduler_disabled():
+    if is_scheduler_disabled():
         frappe.throw(
             _(
                 "The Scheduler is currently disabled, which needs to be enabled to use e-Invoicing and e-Waybill features. "

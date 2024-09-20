@@ -57,7 +57,9 @@ frappe.ui.form.on(DOCTYPE, {
 });
 
 async function gst_invoice_warning(frm) {
-    if (is_gst_invoice(frm) && !(await contains_gst_account(frm))) {
+    const contains_gst_account = frm.doc.taxes.some(row => row.gst_tax_type);
+
+    if (is_gst_invoice(frm) && !contains_gst_account) {
         frm.dashboard.add_comment(
             __(
                 `GST is applicable for this invoice but no tax accounts specified in <a href="/app/gst-settings">
@@ -89,30 +91,8 @@ function is_gst_invoice(frm) {
                 item.gst_treatment == "Nil-Rated" || item.gst_treatment == "Exempted"
         );
 
-    if (frm.doc.place_of_supply === "96-Other Countries") {
+    if (frm.doc.items[0].gst_treatment === "Zero-Rated")
         return gst_invoice_conditions && frm.doc.is_export_with_gst;
-    } else {
-        return gst_invoice_conditions;
-    }
+    else return gst_invoice_conditions;
 }
 
-async function contains_gst_account(frm) {
-    const gst_accounts = await _get_account_options(frm.doc.company);
-    const accounts = frm.doc.taxes.map(taxes => taxes.account_head);
-
-    return accounts.some(account => gst_accounts.includes(account));
-}
-
-async function _get_account_options(company) {
-    if (!frappe.flags.gst_accounts) {
-        frappe.flags.gst_accounts = {};
-    }
-
-    if (!frappe.flags.gst_accounts[company]) {
-        frappe.flags.gst_accounts[company] = await india_compliance.get_account_options(
-            company
-        );
-    }
-
-    return frappe.flags.gst_accounts[company];
-}

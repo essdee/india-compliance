@@ -6,7 +6,7 @@ from india_compliance.gst_india.overrides.sales_invoice import (
     update_dashboard_with_gst_logs,
 )
 from india_compliance.gst_india.overrides.transaction import validate_transaction
-from india_compliance.gst_india.utils import get_gst_accounts_by_type, is_api_enabled
+from india_compliance.gst_india.utils import is_api_enabled
 from india_compliance.gst_india.utils.e_waybill import get_e_waybill_info
 
 
@@ -50,6 +50,20 @@ def validate(doc, method=None):
     set_reconciliation_status(doc)
 
 
+def on_cancel(doc, method=None):
+
+    frappe.db.set_value(
+        "GST Inward Supply",
+        {"link_doctype": "Purchase Invoice", "link_name": doc.name},
+        {
+            "match_status": "",
+            "link_name": "",
+            "link_doctype": "",
+            "action": "No Action",
+        },
+    )
+
+
 def set_reconciliation_status(doc):
     reconciliation_status = "Not Applicable"
 
@@ -71,8 +85,8 @@ def is_b2b_invoice(doc):
 
 def update_itc_totals(doc, method=None):
     # Set default value
-    if not doc.itc_classification:
-        doc.itc_classification = "All Other ITC"
+    set_itc_classification(doc)
+    validate_reverse_charge(doc)
 
     # Initialize values
     doc.itc_integrated_tax = 0
@@ -83,20 +97,37 @@ def update_itc_totals(doc, method=None):
     if doc.ineligibility_reason == "ITC restricted due to PoS rules":
         return
 
-    gst_accounts = get_gst_accounts_by_type(doc.company, "Input")
-
     for tax in doc.get("taxes"):
-        if tax.account_head == gst_accounts.igst_account:
+        if tax.gst_tax_type == "igst":
             doc.itc_integrated_tax += flt(tax.base_tax_amount_after_discount_amount)
 
-        if tax.account_head == gst_accounts.sgst_account:
+        if tax.gst_tax_type == "sgst":
             doc.itc_state_tax += flt(tax.base_tax_amount_after_discount_amount)
 
-        if tax.account_head == gst_accounts.cgst_account:
+        if tax.gst_tax_type == "cgst":
             doc.itc_central_tax += flt(tax.base_tax_amount_after_discount_amount)
 
-        if tax.account_head == gst_accounts.cess_account:
+        if tax.gst_tax_type == "cess":
             doc.itc_cess_amount += flt(tax.base_tax_amount_after_discount_amount)
+
+
+def set_itc_classification(doc):
+    if doc.gst_category == "Overseas":
+        for item in doc.items:
+            if not item.gst_hsn_code.startswith("99"):
+                doc.itc_classification = "Import Of Goods"
+                break
+        else:
+            doc.itc_classification = "Import Of Service"
+
+    elif doc.is_reverse_charge:
+        doc.itc_classification = "ITC on Reverse Charge"
+
+    elif doc.gst_category == "Input Service Distributor" and doc.is_internal_transfer():
+        doc.itc_classification = "Input Service Distributor"
+
+    else:
+        doc.itc_classification = "All Other ITC"
 
 
 def validate_supplier_invoice_number(doc):
@@ -161,11 +192,10 @@ def validate_with_inward_supply(doc):
         mismatch_fields["Taxable Value"] = doc._inward_supply.get("taxable_value")
 
     # mismatch for taxes
-    gst_accounts = get_gst_accounts_by_type(doc.company, "Input")
     for tax in ["cgst", "sgst", "igst", "cess"]:
-        tax_amount = get_tax_amount(doc.taxes, gst_accounts[tax + "_account"])
+        tax_amount = get_tax_amount(doc.taxes, tax)
         if tax == "cess":
-            tax_amount += get_tax_amount(doc.taxes, gst_accounts.cess_non_advol_account)
+            tax_amount += get_tax_amount(doc.taxes, "cess_non_advol")
 
         if tax_amount == doc._inward_supply.get(tax):
             continue
@@ -193,15 +223,15 @@ def validate_with_inward_supply(doc):
         )
 
 
-def get_tax_amount(taxes, account_head):
-    if not (taxes or account_head):
+def get_tax_amount(taxes, gst_tax_type):
+    if not (taxes or gst_tax_type):
         return 0
 
     return sum(
         [
             tax.base_tax_amount_after_discount_amount
             for tax in taxes
-            if tax.account_head == account_head
+            if tax.gst_tax_type == gst_tax_type
         ]
     )
 
@@ -226,3 +256,10 @@ def set_ineligibility_reason(doc, show_alert=True):
             alert=True,
             indicator="orange",
         )
+
+
+def validate_reverse_charge(doc):
+    if doc.itc_classification != "Import Of Goods" or not doc.is_reverse_charge:
+        return
+
+    frappe.throw(_("Reverse Charge is not applicable on Import of Goods"))

@@ -49,7 +49,6 @@ def _create_import_log(
         "return_period": return_period,
     }
 
-    # TODO: change classification to gstr_category
     if classification:
         fields["classification"] = classification
 
@@ -73,7 +72,7 @@ def toggle_scheduled_jobs(stopped):
     scheduled_job = frappe.db.get_value(
         "Scheduled Job Type",
         {
-            "method": "india_compliance.gst_india.utils.gstr.download_queued_request",
+            "method": "india_compliance.gst_india.utils.gstr_utils.download_queued_request",
         },
     )
 

@@ -15,7 +15,9 @@ from frappe.utils import (
     cint,
     cstr,
     get_datetime,
+    get_last_day,
     get_link_to_form,
+    get_quarter_start,
     get_system_timezone,
     getdate,
 )
@@ -93,7 +95,6 @@ def get_gstin_list(party, party_type="Company"):
     """
     Returns a list the party's GSTINs.
     """
-
     frappe.has_permission(party_type, doc=party, throw=True)
 
     gstin_list = frappe.get_all(
@@ -171,7 +172,8 @@ def validate_gstin(
             title=_("Invalid {0}").format(label),
         )
 
-    if not (is_transporter_id and gstin.startswith("88")):
+    # eg: 29AAFCA7488L1Z0 invalid check digit for valid transporter id
+    if not is_transporter_id:
         validate_gstin_check_digit(gstin, label)
 
     if is_tcs_gstin and not TCS.match(gstin):
@@ -210,13 +212,6 @@ def validate_gst_category(gst_category, gstin):
             _(
                 "GST Category cannot be Unregistered for party with GSTIN",
             )
-        )
-
-    if TCS.match(gstin):
-        frappe.throw(
-            _(
-                "e-Commerce Operator (TCS) GSTIN is not allowed for transaction / party / address"
-            ),
         )
 
     valid_gstin_format = GSTIN_FORMATS.get(gst_category)
@@ -302,12 +297,16 @@ def guess_gst_category(
     if GSTIN_FORMATS["Tax Deductor"].match(gstin):
         return "Tax Deductor"
 
+    if GSTIN_FORMATS["Tax Collector"].match(gstin):
+        return "Tax Collector"
+
     if GSTIN_FORMATS["Registered Regular"].match(gstin):
         if gst_category in (
             "Registered Regular",
             "Registered Composition",
             "SEZ",
             "Deemed Export",
+            "Input Service Distributor",
         ):
             return gst_category
 
@@ -409,7 +408,11 @@ def get_place_of_supply(party_details, doctype):
                 return f"{gst_state_number}-{gst_state}"
 
         party_gstin = party_details.billing_address_gstin or party_details.company_gstin
+
+    elif doctype == "Stock Entry":
+        party_gstin = party_details.bill_to_gstin or party_details.bill_from_gstin
     else:
+        # for purchase, subcontracting order and receipt
         party_gstin = party_details.company_gstin or party_details.supplier_gstin
 
     if not party_gstin:
@@ -489,6 +492,12 @@ def get_gst_accounts_by_type(company, account_type, throw=True):
         if row.account_type == account_type and row.company == company:
             return frappe._dict((key, row.get(key)) for key in GST_ACCOUNT_FIELDS)
 
+    if (
+        account_type == "Sales Reverse Charge"
+        and not settings.enable_reverse_charge_in_sales
+    ):
+        return frappe._dict()
+
     if not throw:
         return frappe._dict()
 
@@ -541,6 +550,32 @@ def get_gst_accounts_by_tax_type(company, tax_type, throw=True):
             " Company {1}"
         ).format(frappe.bold(tax_type), frappe.bold(company)),
     )
+
+
+def get_gst_account_gst_tax_type_map():
+    """
+    - Returns gst_account by tax_type for all the companies
+    - Eg.:  {"Input Tax SGST - _TIRC": "sgst", "Input Tax CGST - _TIRC": "cgst"}
+
+    """
+
+    gst_account_map = frappe._dict()
+    settings = frappe.get_cached_doc("GST Settings", "GST Settings")
+
+    for row in settings.gst_accounts:
+        for account in GST_ACCOUNT_FIELDS:
+            account_value = row.get(account)
+
+            if not account_value:
+                continue
+
+            account_key = account[:-8]
+            if row.account_type and row.account_type.endswith("Reverse Charge"):
+                account_key = account_key + "_rcm"
+
+            gst_account_map[account_value] = account_key
+
+    return gst_account_map
 
 
 @frappe.whitelist()
@@ -652,6 +687,13 @@ def get_titlecase_version(word, all_caps=False, **kwargs):
         return word
 
 
+def is_production_api_enabled(settings=None):
+    if not settings:
+        settings = frappe.get_cached_doc("GST Settings")
+
+    return is_api_enabled(settings) and not settings.sandbox_mode
+
+
 def is_api_enabled(settings=None):
     if not settings:
         settings = frappe.get_cached_value(
@@ -666,11 +708,7 @@ def is_api_enabled(settings=None):
 
 def is_autofill_party_info_enabled():
     settings = frappe.get_cached_doc("GST Settings")
-    return (
-        is_api_enabled(settings)
-        and settings.autofill_party_info
-        and not settings.sandbox_mode
-    )
+    return is_production_api_enabled(settings) and settings.autofill_party_info
 
 
 def can_enable_api(settings):
@@ -771,6 +809,26 @@ def get_timespan_date_range(timespan: str, company: str | None = None) -> tuple 
         fiscal_year = get_fiscal_year(date, company=company)
         return (fiscal_year[1], fiscal_year[2])
 
+    if timespan == "this fiscal year to last month":
+        date = getdate()
+        fiscal_year = get_fiscal_year(date, company=company)
+        last_month = add_to_date(date, months=-1)
+
+        if fiscal_year[1] > last_month:
+            return (fiscal_year[1], fiscal_year[1])
+
+        return (fiscal_year[1], get_last_day(last_month))
+
+    if timespan == "this quarter to last month":
+        date = getdate()
+        quarter_start = get_quarter_start(date)
+        last_month = get_last_day(add_to_date(date, months=-1))
+
+        if quarter_start > last_month:
+            return (quarter_start, quarter_start)
+
+        return (quarter_start, get_last_day(last_month))
+
     return
 
 
@@ -841,6 +899,11 @@ def tar_gz_bytes_to_data(tar_gz_bytes: bytes) -> str | None:
 @frappe.whitelist(methods=["POST"])
 def disable_item_tax_template_notification():
     frappe.defaults.clear_user_default("needs_item_tax_template_notification")
+
+
+@frappe.whitelist(methods=["POST"])
+def disable_new_gst_category_notification():
+    frappe.defaults.clear_user_default("needs_new_gst_category_notification")
 
 
 def validate_invoice_number(doc):

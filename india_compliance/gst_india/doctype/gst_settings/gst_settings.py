@@ -5,7 +5,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.query_builder.functions import IfNull
-from frappe.utils import getdate
+from frappe.utils import add_to_date, getdate
 
 from india_compliance.gst_india.constants import GST_ACCOUNT_FIELDS, GST_PARTY_TYPES
 from india_compliance.gst_india.constants.custom_fields import (
@@ -13,13 +13,13 @@ from india_compliance.gst_india.constants.custom_fields import (
     E_WAYBILL_FIELDS,
     SALES_REVERSE_CHARGE_FIELDS,
 )
+from india_compliance.gst_india.doctype.gstin.gstin import get_gstr_1_filed_upto
 from india_compliance.gst_india.page.india_compliance_account import (
     _disable_api_promo,
     post_login,
 )
 from india_compliance.gst_india.utils import can_enable_api, is_api_enabled
 from india_compliance.gst_india.utils.custom_fields import toggle_custom_fields
-from india_compliance.gst_india.utils.e_invoice import get_e_invoice_applicability_date
 from india_compliance.gst_india.utils.gstin_info import get_gstin_info
 
 E_INVOICE_START_DATE = "2021-01-01"
@@ -85,10 +85,45 @@ class GSTSettings(Document):
 
         frappe.db.set_value(
             "Scheduled Job Type",
-            "e_invoice.retry_e_invoice_e_waybill_generation",
+            {
+                "method": "india_compliance.gst_india.utils.e_invoice.retry_e_invoice_e_waybill_generation"
+            },
             "stopped",
             not self.enable_retry_einv_ewb_generation,
         )
+
+    def update_auto_refresh_authtoken_scheduled_job(self):
+        if not self.has_value_changed("enable_auto_reconciliation"):
+            return
+
+        frappe.db.set_value(
+            "Scheduled Job Type",
+            {
+                "method": "india_compliance.gst_india.doctype.purchase_reconciliation_tool.purchase_reconciliation_tool.auto_refresh_authtoken"
+            },
+            "stopped",
+            not self.enable_auto_reconciliation,
+        )
+
+    def get_gstin_with_credentials(self, service=None):
+        if not service:
+            return
+
+        if service == "Returns" and not self:
+            return
+
+        if service == "e-Waybill" and not self.enable_e_waybill:
+            return
+
+        if service == "e-Invoice" and not self.enable_e_invoice:
+            return
+
+        if service in ["e-Invoice", "e-Waybill"]:
+            service = "e-Waybill / e-Invoice"
+
+        for row in self.credentials:
+            if row.service == service:
+                return row.gstin
 
     def validate_gst_accounts(self):
         account_list = []
@@ -186,18 +221,28 @@ class GSTSettings(Document):
                 _("Missing Required Field"),
             )
 
-        if (self.enable_e_invoice or self.enable_e_waybill) and all(
-            credential.service != "e-Waybill / e-Invoice"
-            for credential in self.credentials
+        if (
+            (self.enable_e_invoice or self.enable_e_waybill)
+            and not self.sandbox_mode
+            and not frappe.flags.in_setup_wizard
+            and all(
+                credential.service != "e-Waybill / e-Invoice"
+                for credential in self.credentials
+            )
         ):
             frappe.msgprint(
-                # TODO: Add Link to Documentation.
                 _(
                     "Please set credentials for e-Waybill / e-Invoice to use API"
-                    " features"
+                    " features.<br>"
+                    "For more information, refer to the following documentation: {0}"
+                ).format(
+                    """
+                <a href="https://docs.indiacompliance.app/docs/ewaybill-and-einvoice/gst_settings" target="_blank">
+                    Setup Credentials for e-Waybill / e-Invoice
+                </a>
+                """
                 ),
                 indicator="yellow",
-                alert=True,
             )
 
     def validate_app_key(self, credential):
@@ -265,6 +310,42 @@ class GSTSettings(Document):
 
             company_list.append(row.company)
 
+    def is_sek_valid(self, gstin, throw=False, threshold=30):
+        for credential in self.credentials:
+            if credential.service == "Returns" and credential.gstin == gstin:
+                break
+
+        else:
+            if throw:
+                frappe.throw(
+                    _(
+                        "No credential found for the GSTIN {0} in the GST Settings"
+                    ).format(gstin)
+                )
+
+            return False
+
+        if credential.session_expiry and credential.session_expiry > add_to_date(
+            None, minutes=threshold * -1
+        ):
+            return True
+
+    def has_valid_credentials(self, gstin, service, throw=False):
+        for credential in self.credentials:
+            if credential.gstin == gstin and credential.service == service:
+                break
+        else:
+            message = _(
+                "No credential found for the GSTIN {0} in the GST Settings"
+            ).format(gstin)
+
+            if throw:
+                frappe.throw(message)
+
+            return False
+
+        return True
+
 
 @frappe.whitelist()
 def disable_api_promo():
@@ -299,9 +380,15 @@ def update_gst_category():
 
     # party-wise addresses
     category_map = {}
+    gstin_info_map = {}
+
     for address in address_without_category:
-        gstin_info = get_gstin_info(address.gstin)
-        gst_category = gstin_info.gst_category
+        gstin = address.gstin
+
+        if gstin not in gstin_info_map:
+            gstin_info_map[gstin] = get_gstin_info(gstin)
+
+        gst_category = gstin_info_map[gstin].gst_category
 
         category_map.setdefault(gst_category, []).append(address.name)
 
@@ -338,6 +425,24 @@ def update_e_invoice_status():
 
         update_pending_status(e_invoice_applicability_date, company)
         update_not_applicable_status(e_invoice_applicability_date, company)
+
+
+def get_e_invoice_applicability_date(company, settings=None, throw=True):
+    if not settings:
+        settings = frappe.get_cached_doc("GST Settings")
+
+    e_invoice_applicable_from = settings.e_invoice_applicable_from
+
+    if settings.apply_e_invoice_only_for_selected_companies:
+        for row in settings.e_invoice_applicable_companies:
+            if company == row.company:
+                e_invoice_applicable_from = row.applicable_from
+                break
+
+        else:
+            return
+
+    return e_invoice_applicable_from
 
 
 def update_pending_status(e_invoice_applicability_date, company=None):
@@ -389,3 +494,54 @@ def update_not_applicable_status(e_invoice_applicability_date=None, company=None
         company = query.where(sales_invoice.company == company)
 
     query.run()
+
+
+def restrict_gstr_1_transaction_for(posting_date, company_gstin, gst_settings=None):
+    """
+    Check if the user is allowed to modify transactions before the GSTR-1 filing date
+    Additionally, update the `is_not_latest_gstr1_data` field in the GST Return Log
+    """
+    posting_date = getdate(posting_date)
+
+    if not gst_settings:
+        gst_settings = frappe.get_cached_doc("GST Settings")
+
+    restrict = True
+
+    if not gst_settings.restrict_changes_after_gstr_1:
+        restrict = False
+
+    gstr_1_filed_upto = get_gstr_1_filed_upto(company_gstin)
+
+    if not gstr_1_filed_upto:
+        restrict = False
+
+    elif posting_date > getdate(gstr_1_filed_upto):
+        restrict = False
+
+    if (
+        gst_settings.role_allowed_to_modify in frappe.get_roles()
+        or frappe.session.user == "Administrator"
+    ):
+        restrict = False
+
+    if restrict:
+        return gstr_1_filed_upto
+
+    update_is_not_latest_gstr1_data(posting_date, company_gstin)
+
+    return None
+
+
+def update_is_not_latest_gstr1_data(posting_date, company_gstin):
+    period = posting_date.strftime("%m%Y")
+
+    frappe.db.set_value(
+        "GST Return Log", f"GSTR1-{period}-{company_gstin}", "is_latest_data", 0
+    )
+
+    frappe.publish_realtime(
+        "is_not_latest_data",
+        message={"filters": {"company_gstin": company_gstin, "period": period}},
+        doctype="GSTR-1 Beta",
+    )
