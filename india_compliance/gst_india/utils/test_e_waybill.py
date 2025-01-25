@@ -15,7 +15,7 @@ from frappe.www.printview import get_html_and_style
 from erpnext.controllers.sales_and_purchase_return import make_return_doc
 
 from india_compliance.gst_india.api_classes.base import BASE_URL
-from india_compliance.gst_india.utils import load_doc
+from india_compliance.gst_india.utils import load_doc, parse_datetime
 from india_compliance.gst_india.utils.e_invoice import (
     retry_e_invoice_e_waybill_generation,
 )
@@ -69,8 +69,6 @@ class TestEWaybill(FrappeTestCase):
             )
         )
 
-    @classmethod
-    def setUp(cls):
         update_dates_for_test_data(cls.e_waybill_test_data)
 
     def test_get_data(self):
@@ -1056,6 +1054,45 @@ class TestEWaybill(FrappeTestCase):
         self.assertDocumentEqual(
             {"name": se_data.get("response_data").get("result").get("ewayBillNo")},
             frappe.get_doc("e-Waybill Log", {"reference_name": stock_entry.name}),
+        )
+
+        stock_entry = load_doc("Stock Entry", stock_entry.name, "submit")
+
+        e_waybill_info = stock_entry.get("__onload").e_waybill_info
+
+        self.assertEqual(
+            e_waybill_info.valid_upto,
+            parse_datetime(
+                se_data.get("response_data").get("result").get("validUpto"),
+                day_first=True,
+            ),
+        )
+
+    @change_settings("GST Settings", {"enable_e_waybill_for_sc": 1})
+    @responses.activate
+    def test_e_waybill_for_stock_entry_same_gstin(self):
+        """Test to generate e-waybill for Stock Entry with same gstin"""
+        se_data = self.e_waybill_test_data.get("stock_entry_with_same_gstin")
+
+        stock_entry = self._create_stock_entry("stock_entry_with_same_gstin")
+
+        self._generate_e_waybill(stock_entry.name, "Stock Entry", se_data)
+
+        self.assertDocumentEqual(
+            {"name": se_data.get("response_data").get("result").get("ewayBillNo")},
+            frappe.get_doc("e-Waybill Log", {"reference_name": stock_entry.name}),
+        )
+
+        stock_entry = load_doc("Stock Entry", stock_entry.name, "submit")
+
+        e_waybill_info = stock_entry.get("__onload").e_waybill_info
+
+        self.assertEqual(
+            e_waybill_info.valid_upto,
+            parse_datetime(
+                se_data.get("response_data").get("result").get("validUpto"),
+                day_first=True,
+            ),
         )
 
 

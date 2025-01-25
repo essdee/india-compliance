@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import responses
+from responses import matchers
+
 import frappe
+from frappe.tests.utils import FrappeTestCase, change_settings
 
 from india_compliance.gst_india.utils.gstin_info import get_gstin_info
 
@@ -71,6 +75,8 @@ class TestGstinInfo(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        super().setUpClass()
+
         cls.gstin = "24AAUPV7468F1ZW"
         cls.mock_public_api_patcher = patch(
             "india_compliance.gst_india.utils.gstin_info.PublicAPI"
@@ -189,3 +195,28 @@ class TestGstinInfo(unittest.TestCase):
                 },
             },
         )
+
+
+class TestGstinInvalidInfo(FrappeTestCase):
+    @responses.activate
+    @change_settings("GST Settings", {"validate_gstin_status": 1, "sandbox_mode": 0})
+    def test_invalid_gstin(self):
+        gstin = "24AQTPC8950E1ZO"
+        url = "https://asp.resilient.tech/commonapi/search"
+
+        responses.add(
+            responses.GET,
+            url,
+            json={
+                "errorCode": "FO8000",
+                "gstin": "24AQTPC8950E1ZO",
+                "message": "No records found",
+                "sts": "Invalid",
+                "success": False,
+            },
+            match=[matchers.query_param_matcher({"action": "TP", "gstin": gstin})],
+        )
+
+        gstin_info = get_gstin_info(gstin)
+        self.assertEqual(gstin_info.status, "Invalid")
+        self.assertEqual(gstin_info.business_name, "")

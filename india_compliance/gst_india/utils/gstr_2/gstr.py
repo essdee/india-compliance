@@ -47,8 +47,7 @@ class GSTR:
         self.setup()
 
     def setup(self):
-        self.existing_transaction = {}
-        pass
+        self.existing_transaction = self.get_existing_transaction()
 
     def create_transactions(self, category, suppliers):
         if not suppliers:
@@ -63,28 +62,24 @@ class GSTR:
 
             current_transaction += 1
             frappe.publish_realtime(
-                "update_transactions_progress",
+                "update_2a_2b_transactions_progress",
                 {
                     "current_progress": current_transaction * 100 / total_transactions,
                     "return_period": self.return_period,
                 },
                 user=frappe.session.user,
-                doctype="Purchase Reconciliation Tool",
             )
 
             if transaction.get("unique_key") in self.existing_transaction:
                 self.existing_transaction.pop(transaction.get("unique_key"))
 
-        self.delete_missing_transactions()
+        self.handle_missing_transactions()
 
-    def delete_missing_transactions(self):
-        """
-        For GSTR2a, transactions are reflected immediately after it's pushed to GSTR-1.
-        At times, it may later be removed from GSTR-1.
-
-        In such cases, we need to delete such unfilled transactions not present in the latest data.
-        """
+    def handle_missing_transactions(self):
         return
+
+    def get_existing_transaction(self):
+        return {}
 
     def get_all_transactions(self, category, suppliers):
         transactions = []
@@ -110,8 +105,12 @@ class GSTR:
             classification=category.value,
             **self.get_supplier_details(supplier),
             **self.get_invoice_details(invoice),
+            **self.get_download_details(),
             items=self.get_transaction_items(invoice),
         )
+
+        if transaction.get("items"):
+            self.update_totals(transaction)
 
         transaction["unique_key"] = (
             f"{transaction.get('supplier_gstin', '')}-{transaction.get('bill_no', '')}"
@@ -119,16 +118,25 @@ class GSTR:
 
         return transaction
 
+    def update_totals(self, transaction):
+        for field in ["taxable_value", "igst", "cgst", "sgst", "cess"]:
+            transaction[field] = sum(
+                [row.get(field) for row in transaction.get("items") if row.get(field)]
+            )
+
     def get_supplier_details(self, supplier):
         return {}
 
     def get_invoice_details(self, invoice):
         return {}
 
+    def get_download_details(self):
+        return {}
+
     def get_transaction_items(self, invoice):
         return [
             self.get_transaction_item(frappe._dict(item))
-            for item in invoice.get(self.get_key("items_key"))
+            for item in invoice.get(self.get_key("items_key"), [])
         ]
 
     def get_transaction_item(self, item):

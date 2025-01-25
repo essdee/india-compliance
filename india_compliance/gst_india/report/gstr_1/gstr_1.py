@@ -11,7 +11,7 @@ from frappe.query_builder import Criterion
 from frappe.query_builder.functions import Date, IfNull, Sum
 from frappe.utils import cint, flt, formatdate, getdate
 
-from india_compliance.gst_india.constants.__init__ import GST_TAX_TYPES
+from india_compliance.gst_india.constants import GST_TAX_TYPES
 from india_compliance.gst_india.report.hsn_wise_summary_of_outward_supplies.hsn_wise_summary_of_outward_supplies import (
     get_columns as get_hsn_columns,
 )
@@ -22,11 +22,14 @@ from india_compliance.gst_india.report.hsn_wise_summary_of_outward_supplies.hsn_
     get_hsn_data,
     get_hsn_wise_json_data,
 )
-from india_compliance.gst_india.utils import get_escaped_name, get_gst_accounts_by_type
+from india_compliance.gst_india.utils import (
+    get_escaped_name,
+    get_gst_accounts_by_type,
+    get_gstin_list,
+    validate_invoice_number,
+)
 from india_compliance.gst_india.utils.exporter import ExcelExporter
-from india_compliance.gst_india.utils.gstr_1 import SUPECOM
-
-B2C_LIMIT = 2_50_000
+from india_compliance.gst_india.utils.gstr_1 import SUPECOM, get_b2c_limit
 
 TYPES_OF_BUSINESS = {
     "B2B": "b2b",
@@ -255,7 +258,8 @@ class Gstr1Report:
         grand_total = invoice.return_against_invoice_total or abs(
             invoice.base_grand_total
         )
-        return grand_total > B2C_LIMIT
+
+        return grand_total > get_b2c_limit(invoice.posting_date)
 
     def get_row_data_for_invoice(self, invoice_details, tax_rate, item_detail):
         """
@@ -374,20 +378,36 @@ class Gstr1Report:
             )
 
         if self.filters.get("type_of_business") == "B2C Large":
-            conditions += """ AND ifnull(SUBSTR(place_of_supply, 1, 2),'') != ifnull(SUBSTR(company_gstin, 1, 2),'')
-                AND grand_total > {0} AND is_return != 1 AND is_debit_note !=1
+            # get_b2c_limit hardcoded
+            conditions += """
+                AND ifnull(SUBSTR(place_of_supply, 1, 2),'') != ifnull(SUBSTR(company_gstin, 1, 2),'')
+                AND grand_total >  (
+                    CASE
+                        WHEN posting_date <= '2024-07-31' THEN 250000
+                        ELSE 100000
+                    END
+                )
+                AND is_return != 1
+                AND is_debit_note !=1
                 AND IFNULL(gst_category, "") in ('Unregistered', 'Overseas')
-                AND SUBSTR(place_of_supply, 1, 2) != '96'""".format(
-                B2C_LIMIT
-            )
+                AND SUBSTR(place_of_supply, 1, 2) != '96'
+            """
 
         elif self.filters.get("type_of_business") == "B2C Small":
-            conditions += """ AND (
-                SUBSTR(place_of_supply, 1, 2) = SUBSTR(company_gstin, 1, 2)
-                    OR grand_total <= {0}) AND IFNULL(gst_category, "") in ('Unregistered', 'Overseas')
-                    AND SUBSTR(place_of_supply, 1, 2) != '96' """.format(
-                B2C_LIMIT
-            )
+            # get_b2c_limit hardcoded
+            conditions += """
+                AND (
+                    SUBSTR(place_of_supply, 1, 2) = SUBSTR(company_gstin, 1, 2)
+                    OR grand_total <= (
+                        CASE
+                            WHEN posting_date <= '2024-07-31' THEN 250000
+                            ELSE 100000
+                        END
+                    )
+                )
+                AND IFNULL(gst_category, "") in ('Unregistered', 'Overseas')
+                AND SUBSTR(place_of_supply, 1, 2) != '96'
+            """
 
         elif self.filters.get("type_of_business") == "CDNR-REG":
             conditions += """ AND (is_return = 1 OR is_debit_note = 1) AND IFNULL(gst_category, '') not in ('Unregistered', 'Overseas')"""
@@ -1456,6 +1476,7 @@ class GSTR1DocumentIssuedSummary:
 
         additional_conditions = [
             self.purchase_invoice.is_reverse_charge == 1,
+            IfNull(self.purchase_invoice.supplier_gstin, "") == "",
         ]
         return self.build_query(
             doctype=self.purchase_invoice,
@@ -1586,6 +1607,7 @@ class GSTR1DocumentIssuedSummary:
 
     def seperate_data_by_nature_of_document(self, data, doctype):
         nature_of_document = {
+            "Excluded from Report (Invalid Invoice Number)": [],
             "Excluded from Report (Same GSTIN Billing)": [],
             "Excluded from Report (Is Opening Entry)": [],
             "Excluded from Report (Has Non GST Item)": [],
@@ -1597,7 +1619,12 @@ class GSTR1DocumentIssuedSummary:
         }
 
         for doc in data:
-            if doc.is_opening == "Yes":
+            if not validate_invoice_number(doc, throw=False):
+                nature_of_document[
+                    "Excluded from Report (Invalid Invoice Number)"
+                ].append(doc)
+
+            elif doc.is_opening == "Yes":
                 nature_of_document["Excluded from Report (Is Opening Entry)"].append(
                     doc
                 )
@@ -2060,6 +2087,7 @@ def get_document_issued_summary_json(data):
         "Invoices for outward supply": 1,
         "Debit Note": 4,
         "Credit Note": 5,
+        "Invoices for inward supply from unregistered person": 2,
     }
 
     document_lists = {document_type: [] for document_type in document_types}
@@ -2204,19 +2232,7 @@ def get_company_gstin_number(company, address=None, all_gstins=False):
         gstin = frappe.db.get_value("Address", address, "gstin")
 
     if not gstin:
-        filters = [
-            ["is_your_company_address", "=", 1],
-            ["Dynamic Link", "link_doctype", "=", "Company"],
-            ["Dynamic Link", "link_name", "=", company],
-            ["Dynamic Link", "parenttype", "=", "Address"],
-            ["gstin", "!=", ""],
-        ]
-        gstin = frappe.get_all(
-            "Address",
-            filters=filters,
-            pluck="gstin",
-            order_by="is_primary_address desc",
-        )
+        gstin = get_gstin_list(company)
         if gstin and not all_gstins:
             gstin = gstin[0]
 

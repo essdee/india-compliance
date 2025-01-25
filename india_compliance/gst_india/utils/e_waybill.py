@@ -38,6 +38,7 @@ from india_compliance.gst_india.constants.e_waybill import (
 from india_compliance.gst_india.utils import (
     handle_server_errors,
     is_foreign_doc,
+    is_outward_stock_entry,
     load_doc,
     parse_datetime,
     send_updated_doc,
@@ -129,8 +130,9 @@ def generate_e_waybills(doctype, docnames, force=False):
             )
 
         finally:
-            # each e-Waybill needs to be committed individually
-            frappe.db.commit()  # nosemgrep
+            if not frappe.flags.in_test:
+                # each e-Waybill needs to be committed individually
+                frappe.db.commit()  # nosemgrep
 
 
 @frappe.whitelist()
@@ -167,6 +169,11 @@ def _generate_e_waybill(doc, throw=True, force=False):
 
         if result.error_code == "4002":
             result = api(doc).get_e_waybill_by_irn(doc.get("irn"))
+
+        if result.error_code == "2148":
+            with_irn = False
+            data = EWaybillData(doc).get_data(with_irn=with_irn)
+            result = EWaybillAPI(doc).generate_e_waybill(data)
 
     except GSPServerError as e:
         handle_server_errors(settings, doc, "e-Waybill", e)
@@ -872,7 +879,8 @@ def _log_and_process_e_waybill(doc, log_data, fetch=False, comment=None):
     if comment:
         log.add_comment(text=comment)
 
-    frappe.db.commit()  # nosemgrep # before delete
+    if not frappe.flags.in_test:
+        frappe.db.commit()  # nosemgrep # before delete
 
     if log.is_cancelled:
         delete_file(doc, get_pdf_filename(log.name))
@@ -884,7 +892,8 @@ def _log_and_process_e_waybill(doc, log_data, fetch=False, comment=None):
         return
 
     _fetch_e_waybill_data(doc, log)
-    frappe.db.commit()  # nosemgrep # after fetch
+    if not frappe.flags.in_test:
+        frappe.db.commit()  # nosemgrep # after fetch
 
     ### Attach PDF
 
@@ -1210,7 +1219,6 @@ class EWaybillData(GSTTransactionData):
         return extension_details
 
     def validate_transaction(self):
-
         super().validate_transaction()
 
         if self.doc.ewaybill:
@@ -1235,6 +1243,8 @@ class EWaybillData(GSTTransactionData):
         - Basic transporter details must be present
         - Transaction does not have any non-GST items
         - Sales Invoice with same company and billing gstin
+        - Inward Stock Transfer with same company and supplier gstin
+        - Outward Material Transfer with different company and supplier gstin
         """
 
         address = ADDRESS_FIELDS.get(self.doc.doctype)
@@ -1263,7 +1273,20 @@ class EWaybillData(GSTTransactionData):
             self.validate_mode_of_transport()
 
         self.validate_non_gst_items()
-        self.validate_same_gstin()
+
+        if is_outward_stock_entry(self.doc):
+            self.validate_different_gstin()
+        else:
+            self.validate_same_gstin()
+
+    def validate_different_gstin(self):
+        if self.doc.company_gstin != self.doc.get("supplier_gstin"):
+            frappe.throw(
+                _(
+                    "e-Waybill cannot be generated because party GSTIN and company GSTIN are different"
+                ),
+                title=_("Invalid Data"),
+            )
 
     def validate_same_gstin(self):
         if self.doc.doctype == "Delivery Note":
@@ -1490,6 +1513,11 @@ class EWaybillData(GSTTransactionData):
                 "sub_supply_type": doc.get("_sub_supply_type", ""),
                 "document_type": "CHL",
             },
+            ("Stock Entry", 1): {
+                "supply_type": "I",
+                "sub_supply_type": doc.get("_sub_supply_type", ""),
+                "document_type": "CHL",
+            },
             ("Subcontracting Receipt", 0): {
                 "supply_type": "I",
                 "sub_supply_type": doc.get("_sub_supply_type", ""),
@@ -1636,6 +1664,7 @@ class EWaybillData(GSTTransactionData):
                 ("Delivery Note", 0): (REGISTERED_GSTIN, OTHER_GSTIN),
                 ("Delivery Note", 1): (OTHER_GSTIN, REGISTERED_GSTIN),
                 ("Stock Entry", 0): (REGISTERED_GSTIN, OTHER_GSTIN),
+                ("Stock Entry", 1): (OTHER_GSTIN, REGISTERED_GSTIN),
                 ("Subcontracting Receipt", 0): (OTHER_GSTIN, REGISTERED_GSTIN),
                 ("Subcontracting Receipt", 1): (REGISTERED_GSTIN, OTHER_GSTIN),
             }
@@ -1645,6 +1674,7 @@ class EWaybillData(GSTTransactionData):
                     {
                         ("Delivery Note", 0): (REGISTERED_GSTIN, REGISTERED_GSTIN),
                         ("Delivery Note", 1): (REGISTERED_GSTIN, REGISTERED_GSTIN),
+                        ("Stock Entry", 0): (REGISTERED_GSTIN, REGISTERED_GSTIN),
                     }
                 )
 

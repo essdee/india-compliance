@@ -389,36 +389,52 @@ def get_place_of_supply(party_details, doctype):
 
     # fallback to company GSTIN for sales or supplier GSTIN for purchases
     # (in retail scenarios, customer / company GSTIN may not be set)
-
     if doctype in SALES_DOCTYPES or doctype == "Payment Entry":
         # for exports, Place of Supply is set using GST category in absence of GSTIN
         if party_details.gst_category == "Overseas":
             return get_overseas_place_of_supply(party_details)
 
+        # customer address based on POS Basis
+        customer_address = party_details.customer_address
+        pos_basis = frappe.get_cached_value(
+            "Accounts Settings",
+            "Accounts Settings",
+            "determine_address_tax_category_from",
+        )
+
+        shipping_gstin = None
         if (
-            party_details.gst_category == "Unregistered"
-            and party_details.customer_address
+            doctype != "Payment Entry"
+            and pos_basis == "Shipping Address"
+            and party_details.shipping_address_name
         ):
+            customer_address = party_details.shipping_address_name
+            shipping_gstin = frappe.db.get_value("Address", customer_address, "gstin")
+
+        customer_gstin = shipping_gstin or party_details.billing_address_gstin
+        # for unregistered
+        if not customer_gstin and customer_address:
             gst_state_number, gst_state = frappe.db.get_value(
                 "Address",
-                party_details.customer_address,
+                customer_address,
                 ("gst_state_number", "gst_state"),
             )
             if gst_state_number and gst_state:
                 return f"{gst_state_number}-{gst_state}"
 
-        party_gstin = party_details.billing_address_gstin or party_details.company_gstin
+        # for registered
+        pos_gstin = customer_gstin or party_details.company_gstin
 
     elif doctype == "Stock Entry":
-        party_gstin = party_details.bill_to_gstin or party_details.bill_from_gstin
+        pos_gstin = party_details.bill_to_gstin or party_details.bill_from_gstin
     else:
         # for purchase, subcontracting order and receipt
-        party_gstin = party_details.company_gstin or party_details.supplier_gstin
+        pos_gstin = party_details.company_gstin or party_details.supplier_gstin
 
-    if not party_gstin:
+    if not pos_gstin:
         return
 
-    state_code = party_gstin[:2]
+    state_code = pos_gstin[:2]
 
     if state := get_state(state_code):
         return f"{state_code}-{state}"
@@ -906,23 +922,34 @@ def disable_new_gst_category_notification():
     frappe.defaults.clear_user_default("needs_new_gst_category_notification")
 
 
-def validate_invoice_number(doc):
+def validate_invoice_number(doc, throw=True):
     """Validate GST invoice number requirements."""
 
-    if len(doc.name) > 16:
-        frappe.throw(
-            _("GST Invoice Number cannot exceed 16 characters"),
-            title=_("Invalid GST Invoice Number"),
+    is_valid_length = len(doc.name) <= 16
+    is_valid_format = GST_INVOICE_NUMBER_FORMAT.match(doc.name)
+
+    if not throw:
+        return is_valid_length and is_valid_format
+
+    if is_valid_length and is_valid_format:
+        return
+
+    title = _("Invalid GST Transaction Name")
+
+    if not is_valid_length:
+        message = _(
+            "Transaction Name must be 16 characters or fewer to meet GST requirements"
+        )
+    else:
+        message = _(
+            "Transaction Name should start with an alphanumeric character and can"
+            " only contain alphanumeric characters, dash (-) and slash (/) to meet GST requirements"
         )
 
-    if not GST_INVOICE_NUMBER_FORMAT.match(doc.name):
-        frappe.throw(
-            _(
-                "GST Invoice Number should start with an alphanumeric character and can"
-                " only contain alphanumeric characters, dash (-) and slash (/)"
-            ),
-            title=_("Invalid GST Invoice Number"),
-        )
+    if doc.doctype == "Sales Invoice":
+        frappe.throw(message, title=title)
+
+    frappe.msgprint(message, title=title)
 
 
 def handle_server_errors(settings, doc, document_type, error):
@@ -962,3 +989,45 @@ def handle_server_errors(settings, doc, document_type, error):
         title=error_message_title.get(type(error)),
         indicator="yellow",
     )
+
+
+def get_month_or_quarter_dict():
+    return {
+        "Jan - Mar": (1, 3),
+        "Apr - Jun": (4, 6),
+        "Jul - Sep": (7, 9),
+        "Oct - Dec": (10, 12),
+        "January": 1,
+        "February": 2,
+        "March": 3,
+        "April": 4,
+        "May": 5,
+        "June": 6,
+        "July": 7,
+        "August": 8,
+        "September": 9,
+        "October": 10,
+        "November": 11,
+        "December": 12,
+    }
+
+
+def get_period(month_or_quarter, year=None):
+    month_or_quarter_no = get_month_or_quarter_dict().get(month_or_quarter)
+
+    if isinstance(month_or_quarter_no, int):
+        month_or_quarter_no = (month_or_quarter_no, month_or_quarter_no)
+
+    if year:
+        return str(month_or_quarter_no[1]).zfill(2) + str(year)
+
+    return month_or_quarter_no
+
+
+def is_outward_stock_entry(doc):
+    if (
+        doc.doctype == "Stock Entry"
+        and doc.purpose in ["Material Transfer", "Material Issue"]
+        and not doc.is_return
+    ):
+        return True

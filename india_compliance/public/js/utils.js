@@ -6,6 +6,7 @@ import {
     TDS_REGEX,
     TCS_REGEX,
     GST_INVOICE_NUMBER_FORMAT,
+    PAN_REGEX,
 } from "./regex_constants";
 
 frappe.provide("india_compliance");
@@ -225,6 +226,22 @@ Object.assign(india_compliance, {
         return india_compliance.is_api_enabled() && gst_settings.enable_e_invoice;
     },
 
+    validate_pan(pan) {
+        if (!pan) return;
+
+        pan = pan.trim().toUpperCase();
+
+        if (pan.length != 10) {
+            frappe.throw(__("PAN should be 10 characters long"));
+        }
+
+        if (!PAN_REGEX.test(pan)) {
+            frappe.throw(__("Invalid PAN format"));
+        }
+
+        return pan;
+    },
+
     validate_gstin(gstin) {
         if (!gstin || gstin.length !== 15) {
             frappe.msgprint(__("GSTIN must be 15 characters long"));
@@ -238,47 +255,6 @@ Object.assign(india_compliance, {
         } else {
             frappe.msgprint(__("Invalid GSTIN"));
         }
-    },
-
-    get_gstin_otp(company_gstin, error_type) {
-        let description = `An OTP has been sent to the registered mobile/email for GSTIN ${company_gstin} for further authentication. Please provide OTP.`;
-        if (error_type === "invalid_otp")
-            description = `Invalid OTP was provided for GSTIN ${company_gstin}. Please try again.`;
-
-        return new Promise(resolve => {
-            const prompt = new frappe.ui.Dialog({
-                title: __("Enter OTP"),
-                fields: [
-                    {
-                        fieldtype: "Data",
-                        label: __("One Time Password"),
-                        fieldname: "otp",
-                        reqd: 1,
-                        description: description,
-                    },
-                ],
-                primary_action_label: __("Submit"),
-                primary_action(values) {
-                    resolve(values.otp);
-                    prompt.hide();
-                },
-                secondary_action_label: __("Resend OTP"),
-                secondary_action() {
-                    frappe.call({
-                        method: "india_compliance.gst_india.utils.gstr_utils.request_otp",
-                        args: { company_gstin },
-                        callback: function () {
-                            frappe.show_alert({
-                                message: __("OTP has been resent."),
-                                indicator: "green",
-                            });
-                            prompt.get_secondary_btn().addClass("disabled");
-                        },
-                    });
-                },
-            });
-            prompt.show();
-        });
     },
 
     guess_gst_category(gstin, country) {
@@ -329,12 +305,14 @@ Object.assign(india_compliance, {
         // returns a list of error messages if invoice number is invalid
         let message_list = [];
         if (invoice_number.length > 16) {
-            message_list.push("GST Invoice Number cannot exceed 16 characters");
+            message_list.push(
+                "Transaction Name must be 16 characters or fewer to meet GST requirements"
+            );
         }
 
         if (!GST_INVOICE_NUMBER_FORMAT.test(invoice_number)) {
             message_list.push(
-                "GST Invoice Number should start with an alphanumeric character and can only contain alphanumeric characters, dash (-) and slash (/)."
+                "Transaction Name should start with an alphanumeric character and can only contain alphanumeric characters, dash (-) and slash (/) to meet GST requirements."
             );
         }
 
@@ -395,12 +373,10 @@ Object.assign(india_compliance, {
             return position === "start"
                 ? `${current_year - 1}-03-01`
                 : `${current_year - 1}-09-30`;
-
         } else if (current_month <= 9) {
             return position === "start"
                 ? `${current_year - 1}-10-01`
                 : `${current_year}-03-31`;
-
         } else {
             return position === "start"
                 ? `${current_year}-04-01`
@@ -429,58 +405,6 @@ Object.assign(india_compliance, {
             .addClass("text-danger");
     },
 
-    async authenticate_company_gstins(company, company_gstin) {
-        const { message: gstin_authentication_status } = await frappe.call({
-            method: "india_compliance.gst_india.utils.gstr_utils.validate_company_gstins",
-            args: { company: company, company_gstin: company_gstin },
-        });
-
-        for (let gstin of Object.keys(gstin_authentication_status)) {
-            if (gstin_authentication_status[gstin]) continue;
-
-            gstin_authentication_status[gstin] =
-                await this.request_and_authenticate_otp(gstin);
-        }
-
-        return Object.keys(gstin_authentication_status);
-    },
-
-    async request_and_authenticate_otp(gstin) {
-        await frappe.call({
-            method: "india_compliance.gst_india.utils.gstr_utils.request_otp",
-            args: { company_gstin: gstin },
-        });
-
-        // wait for OTP to be authenticated to proceed
-        await this.authenticate_otp(gstin);
-    },
-
-    async authenticate_otp(gstin, error_type = null) {
-        if (!error_type) error_type = "otp_requested";
-
-        let is_authenticated = false;
-
-        while (!is_authenticated) {
-            const otp = await this.get_gstin_otp(gstin, error_type);
-
-            const { message } = await frappe.call({
-                method: "india_compliance.gst_india.utils.gstr_utils.authenticate_otp",
-                args: { company_gstin: gstin, otp: otp },
-            });
-
-            if (
-                message &&
-                ["otp_requested", "invalid_otp"].includes(message.error_type)
-            ) {
-                error_type = message.error_type;
-                continue;
-            }
-
-            is_authenticated = true;
-            return true;
-        }
-    },
-
     show_dismissable_alert(wrapper, message, alert_type = "primary", on_close = null) {
         const alert = $(`
             <div class="container">
@@ -507,6 +431,30 @@ Object.assign(india_compliance, {
         });
 
         return alert;
+    },
+
+    is_e_waybill_applicable_for_subcontracting(doc) {
+        if (
+            !(
+                gst_settings.enable_api &&
+                gst_settings.enable_e_waybill &&
+                gst_settings.enable_e_waybill_for_sc
+            )
+        ) {
+            return false;
+        }
+
+        if (doc.doctype != "Stock Entry") return true;
+
+        if (
+            !["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(
+                doc.purpose
+            )
+        ) {
+            return false;
+        }
+
+        return true;
     },
 });
 

@@ -6,12 +6,16 @@ from collections import defaultdict
 from typing import List
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
 from frappe.query_builder.functions import IfNull
 from frappe.utils import add_to_date, cint, now_datetime
 from frappe.utils.response import json_handler
 
-from india_compliance.gst_india.api_classes.taxpayer_base import TaxpayerBaseAPI
+from india_compliance.gst_india.api_classes.taxpayer_base import (
+    TaxpayerBaseAPI,
+    otp_handler,
+)
 from india_compliance.gst_india.constants import ORIGINAL_VS_AMENDED
 from india_compliance.gst_india.doctype.purchase_reconciliation_tool import (
     BaseUtil,
@@ -104,9 +108,10 @@ class PurchaseReconciliationTool(Document):
             return save_gstr_2b(self.company_gstin, period, json_data)
 
     @frappe.whitelist()
+    @otp_handler
     def download_gstr(
         self,
-        company_gstins,
+        company_gstin,
         date_range,
         return_type=None,
         force=False,
@@ -114,12 +119,18 @@ class PurchaseReconciliationTool(Document):
     ):
         frappe.has_permission("Purchase Reconciliation Tool", "write", throw=True)
 
-        return download_gstr(
-            company_gstins=company_gstins,
+        TaxpayerBaseAPI(company_gstin).validate_auth_token()
+
+        frappe.enqueue(
+            download_gstr,
+            company_gstin=company_gstin,
             date_range=date_range,
             return_type=return_type,
             force=force,
             gst_categories=gst_categories,
+            queue="long",
+            now=frappe.flags.in_test,
+            timeout=1800,
         )
 
     @frappe.whitelist()
@@ -232,6 +243,9 @@ class PurchaseReconciliationTool(Document):
         if isup_linked_with := frappe.db.get_value(
             "GST Inward Supply", inward_supply_name, "link_name"
         ):
+            self.set_reconciliation_status(
+                link_doctype, (isup_linked_with,), "Unreconciled"
+            )
             self._unlink_documents((inward_supply_name,))
             purchases.append(isup_linked_with)
 
@@ -257,6 +271,9 @@ class PurchaseReconciliationTool(Document):
         inward_supplies.append(inward_supply_name)
 
         self.db_set("is_modified", 1)
+        self.set_reconciliation_status(
+            link_doctype, (purchase_invoice_name,), "Match Found"
+        )
 
         return self.ReconciledData.get(purchases, inward_supplies)
 
@@ -435,43 +452,14 @@ class PurchaseReconciliationTool(Document):
 
 
 def download_gstr(
-    company_gstins,
+    company_gstin,
     date_range,
-    return_type=None,
+    return_type,
     force=False,
     gst_categories=None,
 ):
-    if return_type:
-        return_type = ReturnType(return_type)
+    return_type = ReturnType(return_type)
 
-    otp_failures = []
-
-    for company_gstin in company_gstins:
-        try:
-            if not return_type or return_type == ReturnType.GSTR2A:
-                error = download_pending_gstr_2a(
-                    date_range, company_gstin, force, gst_categories
-                )
-
-            if not return_type or return_type == ReturnType.GSTR2B:
-                error = download_pending_gstr_2b(date_range, company_gstin)
-
-            if error:
-                otp_failures.append(error)
-
-        except Exception:
-            frappe.log_error(
-                frappe.get_traceback(),
-                f"Error while downloading {return_type.value if return_type else 'GSTR 2A & 2B'} for {company_gstin} ",
-            )
-
-    return otp_failures
-
-
-def download_pending_gstr_2a(
-    date_range, company_gstin, force=False, gst_categories=None
-):
-    return_type = ReturnType.GSTR2A
     periods = BaseUtil.get_periods(date_range, return_type)
     if not force:
         periods = get_periods_to_download(company_gstin, return_type, periods)
@@ -479,19 +467,23 @@ def download_pending_gstr_2a(
     if not periods:
         return
 
-    return download_gstr_2a(company_gstin, periods, gst_categories)
+    try:
+        if return_type == ReturnType.GSTR2A:
+            return download_gstr_2a(company_gstin, periods, gst_categories)
 
+        if return_type == ReturnType.GSTR2B:
+            return download_gstr_2b(company_gstin, periods)
 
-def download_pending_gstr_2b(date_range, company_gstin):
-    return_type = ReturnType.GSTR2B
-    periods = get_periods_to_download(
-        company_gstin, return_type, BaseUtil.get_periods(date_range, return_type)
-    )
-
-    if not periods:
-        return
-
-    return download_gstr_2b(company_gstin, periods)
+    except Exception as e:
+        frappe.publish_realtime(
+            "gstr_2a_2b_download_message",
+            {
+                "title": _("2A/2B Download Failed"),
+                "message": str(e),
+                "indicator": "red",
+            },
+            user=frappe.session.user,
+        )
 
 
 def get_periods_to_download(company_gstin, return_type, periods):
@@ -645,7 +637,7 @@ class AutoReconcile:
         )
         self.reconciliation_companies = self.get_reconciliation_company_list()
 
-    def download_gstr(self):
+    def download_gst_returns(self):
         if not self.is_reconciliation_enabled():
             return
 
@@ -653,14 +645,17 @@ class AutoReconcile:
         gst_categories = self.get_gst_categories()
         gstins = self.get_gstins_with_valid_credentials()
 
-        download_gstr(
-            date_range=[
-                self.inward_supply_from_date.strftime("%Y-%m-%d"),
-                self.today.strftime("%Y-%m-%d"),
-            ],
-            company_gstins=gstins,
-            gst_categories=gst_categories,
-        )
+        for gstin in gstins:
+            for return_type in (ReturnType.GSTR2A, ReturnType.GSTR2B):
+                download_gstr(
+                    date_range=[
+                        self.inward_supply_from_date.strftime("%Y-%m-%d"),
+                        self.today.strftime("%Y-%m-%d"),
+                    ],
+                    company_gstin=gstin,
+                    gst_categories=gst_categories,
+                    return_type=return_type.value,
+                )
 
     def get_gst_categories(self):
         return [
@@ -735,7 +730,7 @@ class AutoReconcile:
 
 def auto_download_gstr():
     """Auto download GSTR 2A and 2B"""
-    AutoReconcile().download_gstr()
+    AutoReconcile().download_gst_returns()
 
 
 def auto_reconcile():

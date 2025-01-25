@@ -21,7 +21,7 @@ frappe.ui.form.on("Sales Invoice", {
         )
             return;
 
-        if(frm.doc.docstatus === 2) return;
+        if (frm.doc.docstatus === 2) return;
 
         const is_einv_generatable = is_e_invoice_generatable(frm, true);
 
@@ -61,6 +61,12 @@ frappe.ui.form.on("Sales Invoice", {
                         },
                     });
                 },
+                "e-Invoice"
+            );
+
+            frm.add_custom_button(
+                __("Mark as Generated"),
+                () => show_mark_e_invoice_as_generated_dialog(frm),
                 "e-Invoice"
             );
         }
@@ -138,6 +144,10 @@ frappe.ui.form.on("Sales Invoice", {
                 return;
             }
 
+            if (gst_settings.auto_cancel_e_invoice === 1) {
+                continueCancellation();
+                return;
+            }
             return show_cancel_e_invoice_dialog(frm, continueCancellation);
         });
     },
@@ -189,6 +199,54 @@ function show_cancel_e_invoice_dialog(frm, callback) {
     `).prependTo(d.wrapper);
 }
 
+function show_mark_e_invoice_as_generated_dialog(frm) {
+    const d = new frappe.ui.Dialog({
+        title: __("Update e-Invoice Details"),
+        fields: get_generated_e_invoice_dialog_fields(),
+        primary_action_label: __("Update"),
+        primary_action(values) {
+            frappe.call({
+                method: "india_compliance.gst_india.utils.e_invoice.mark_e_invoice_as_generated",
+                args: {
+                    doctype: frm.doctype,
+                    docname: frm.doc.name,
+                    values,
+                },
+                callback: () => {
+                    d.hide();
+                    frm.refresh();
+                },
+            });
+        },
+    });
+
+    d.show();
+}
+
+function get_generated_e_invoice_dialog_fields() {
+    let fields = [
+        {
+            label: "IRN Number",
+            fieldname: "irn",
+            fieldtype: "Data",
+            reqd: 1,
+        },
+        {
+            label: "Acknowledgement Number",
+            fieldname: "ack_no",
+            fieldtype: "Data",
+            reqd: 1,
+        },
+        {
+            label: "Acknowledged On",
+            fieldname: "ack_dt",
+            fieldtype: "Datetime",
+            reqd: 1,
+        },
+    ];
+    return fields;
+}
+
 function show_mark_e_invoice_as_cancelled_dialog(frm) {
     const d = new frappe.ui.Dialog({
         title: __("Update Cancelled e-Invoice Details"),
@@ -227,7 +285,10 @@ function get_cancel_e_invoice_dialog_fields(frm, manual_cancel = false) {
             fieldname: "reason",
             fieldtype: "Select",
             reqd: 1,
-            default: manual_cancel ? "Others" : "Data Entry Mistake",
+            default: manual_cancel
+                ? "Others"
+                : gst_settings.reason_for_e_invoice_cancellation ||
+                "Data Entry Mistake",
             options: ["Duplicate", "Data Entry Mistake", "Order Cancelled", "Others"],
         },
         {
