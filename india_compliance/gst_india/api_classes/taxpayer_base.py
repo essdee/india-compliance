@@ -295,7 +295,7 @@ class TaxpayerAuthenticate(BaseAPI):
 
 
 class TaxpayerBaseAPI(TaxpayerAuthenticate):
-    BASE_PATH = "standard/gstn"
+    BASE_PATH = "enriched"
 
     IGNORED_ERROR_CODES = {
         **TaxpayerAuthenticate.IGNORED_ERROR_CODES,

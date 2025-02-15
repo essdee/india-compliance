@@ -80,7 +80,7 @@ class EWaybillAPI(BaseAPI):
         return self.post("EXTENDVALIDITY", data)
 
     def get_transporter_details(self, transporter_id):
-        self.BASE_PATH = "ewb/Master"
+        self.BASE_PATH = "enriched/ewb/Master"
         return self.get("GetTransporterDetails", params={"trn_no": transporter_id})
 
     def update_distance(self, result):

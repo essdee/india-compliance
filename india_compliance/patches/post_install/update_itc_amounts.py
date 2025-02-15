@@ -112,7 +112,8 @@ def get_gst_accounts(
     for row in gst_accounts:
         for fieldname in GST_ACCOUNT_FIELDS:
             if not (value := row.get(fieldname)):
-                continue
+                # continue
+                pass
 
             if not account_wise:
                 result.setdefault(fieldname, []).append(value)
