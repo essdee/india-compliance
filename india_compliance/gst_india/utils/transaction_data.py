@@ -6,9 +6,11 @@ from frappe.utils import format_date, get_link_to_form, getdate, rounded
 
 from india_compliance.gst_india.constants import (
     E_INVOICE_MASTER_CODES_URL,
+    GST_REFUND_TAX_TYPES,
     GST_TAX_RATES,
     GST_TAX_TYPES,
     SUBCONTRACTING_DOCTYPES,
+    TAXABLE_GST_TREATMENTS,
 )
 from india_compliance.gst_india.constants.e_waybill import (
     TRANSPORT_MODES,
@@ -74,7 +76,7 @@ class GSTTransactionData:
         for row in self.doc.items:
             total += row.taxable_value
 
-            if row.gst_treatment in ("Taxable", "Zero-Rated"):
+            if row.gst_treatment in TAXABLE_GST_TREATMENTS:
                 total_taxable_value += row.taxable_value
 
         self.transaction_details.update(
@@ -93,7 +95,9 @@ class GSTTransactionData:
                     self.rounded(total - total_taxable_value)
                 ),
                 "rounding_adjustment": rounding_adjustment,
-                "grand_total": abs(self.rounded(self.doc.get(grand_total_fieldname))),
+                "grand_total": abs(
+                    self.doc.get(grand_total_fieldname)
+                ),  # rounded after updating refund amounts
                 "grand_total_in_foreign_currency": (
                     abs(self.rounded(self.doc.grand_total))
                     if self.doc.get("currency", "INR") != "INR"
@@ -123,6 +127,12 @@ class GSTTransactionData:
             self.transaction_details[key] = 0
 
         for row in self.doc.taxes:
+            if row.gst_tax_type in GST_REFUND_TAX_TYPES:
+                self.transaction_details.grand_total -= (
+                    row.base_tax_amount_after_discount_amount
+                )
+                continue
+
             if (
                 not row.tax_amount
                 or self.is_purchase_rcm
@@ -142,6 +152,11 @@ class GSTTransactionData:
             )
             self.transaction_details.setdefault(tax_key, 0)
             self.transaction_details[tax_key] += abs(self.rounded(tax_amount))
+
+        # Ensure that grand total is rounded as it is updated above
+        self.transaction_details.grand_total = self.rounded(
+            self.transaction_details.grand_total
+        )
 
         # Other Charges
         current_total = 0

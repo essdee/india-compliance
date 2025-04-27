@@ -111,7 +111,8 @@
    "in_standard_filter": 1,
    "label": "Reference Document Name",
    "options": "reference_doctype",
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "created_on",
@@ -139,10 +140,6 @@
    "fieldtype": "Section Break",
    "label": "Extension Details",
    "read_only": 1
-  },
-  {
-   "fieldname": "column_break1",
-   "fieldtype": "Column Break"
   },
   {
    "fieldname": "column_break_grbd",
@@ -182,7 +179,7 @@
    "link_fieldname": "ewaybill"
   }
  ],
- "modified": "2024-12-05 09:50:37.014667",
+ "modified": "2025-04-10 09:56:46.803698",
  "modified_by": "Administrator",
  "module": "GST India",
  "name": "e-Waybill Log",

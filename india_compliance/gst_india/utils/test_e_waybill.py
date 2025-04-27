@@ -204,6 +204,7 @@ class TestEWaybill(FrappeTestCase):
             rate=7.6,
             is_in_state=True,
             do_not_submit=True,
+            company_address="_Test Indian Registered Company-Billing",
         )
 
         append_item(

@@ -320,10 +320,6 @@ class BaseAPI:
         return bearer_token
 
 
-def get_public_ip():
-    return requests.get("https://api.ipify.org").text
-
-
 def check_scheduler_status():
     """
     Throw an error if scheduler is disabled

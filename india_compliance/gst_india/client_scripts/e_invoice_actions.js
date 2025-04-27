@@ -49,12 +49,11 @@ frappe.ui.form.on("Sales Invoice", {
                     frappe.call({
                         method: "india_compliance.gst_india.utils.e_invoice.generate_e_invoice",
                         args: { docname: frm.doc.name, force: true },
-                        callback: async (r) => {
-                            if (r.message?.error_type == "otp_requested") {
-                                await india_compliance.authenticate_otp(frm.doc.company_gstin);
-                                await frappe.call({
+                        callback: async r => {
+                            if (r.message?.error_code == "2283") {
+                                await taxpayer_api.call({
                                     method: "india_compliance.gst_india.utils.e_invoice.handle_duplicate_irn_error",
-                                    args: r.message
+                                    args: r.message,
                                 });
                             }
                             frm.refresh();
@@ -194,7 +193,7 @@ function show_cancel_e_invoice_dialog(frm, callback) {
 
     $(`
         <div class="alert alert-warning" role="alert">
-            Sales invoice will be cancelled along with the IRN.
+            ${__("Sales invoice will be cancelled along with the IRN.")}
         </div>
     `).prependTo(d.wrapper);
 }

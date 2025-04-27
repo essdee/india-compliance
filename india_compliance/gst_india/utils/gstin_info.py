@@ -5,18 +5,19 @@ from string import whitespace
 from pypika import Order
 
 import frappe
-from frappe import _
+from frappe import _, request_cache
 from frappe.query_builder.functions import Concat, Substring
-from frappe.utils import getdate
+from frappe.utils import add_to_date, cint
 
 from india_compliance.exceptions import GSPServerError
 from india_compliance.gst_india.api_classes.base import BASE_URL
 from india_compliance.gst_india.api_classes.e_invoice import EInvoiceAPI
 from india_compliance.gst_india.api_classes.e_waybill import EWaybillAPI
 from india_compliance.gst_india.api_classes.public import PublicAPI
-from india_compliance.gst_india.doctype.gst_return_log.gst_return_log import (
-    process_gstr_returns_info,
+from india_compliance.gst_india.api_classes.taxpayer_base import (
+    otp_handler,
 )
+from india_compliance.gst_india.api_classes.taxpayer_returns import GSTR1API
 from india_compliance.gst_india.utils import parse_datetime, titlecase, validate_gstin
 
 GST_CATEGORIES = {
@@ -39,15 +40,18 @@ CHARACTERS_TO_STRIP = f"{whitespace},"
 
 
 @frappe.whitelist()
-def get_gstin_info(gstin, *, throw_error=True):
+def get_gstin_info(gstin, *, doc=None, throw_error=True):
+    if doc and isinstance(doc, str):
+        doc = frappe.parse_json(doc)
+
     if not frappe.get_cached_doc("User", frappe.session.user).has_desk_access():
         frappe.throw(_("Not allowed"), frappe.PermissionError)
 
-    return _get_gstin_info(gstin, throw_error=throw_error)
+    return _get_gstin_info(gstin, doc=doc, throw_error=throw_error)
 
 
-def _get_gstin_info(gstin, *, throw_error=True):
-    validate_gstin(gstin)
+def _get_gstin_info(gstin, *, doc=None, throw_error=True):
+    gstin = validate_gstin(gstin)
     response = get_archived_gstin_info(gstin)
 
     if not response:
@@ -55,7 +59,7 @@ def _get_gstin_info(gstin, *, throw_error=True):
             if frappe.cache.get_value("gst_server_error"):
                 return frappe._dict()
 
-            response = PublicAPI().get_gstin_info(gstin)
+            response = PublicAPI(doc).get_gstin_info(gstin)
             frappe.enqueue(
                 "india_compliance.gst_india.doctype.gstin.gstin.create_or_update_gstin_status",
                 queue="long",
@@ -106,7 +110,7 @@ def get_archived_gstin_info(gstin):
 
     archive_date_limit = frappe.utils.now_datetime() - timedelta(days=archive_days)
 
-    completed_requestes = frappe.get_all(
+    archived_response = frappe.db.get_value(
         "Integration Request",
         {
             "status": "Completed",
@@ -114,16 +118,18 @@ def get_archived_gstin_info(gstin):
             "data": ("like", f"%{gstin}%"),
             "modified": (">", archive_date_limit),
         },
-        pluck="output",
-        limit=1,
+        "output",
     )
 
-    if not completed_requestes:
+    if not archived_response:
         return
 
-    response = json.loads(completed_requestes[0], object_hook=frappe._dict)
+    try:
+        archived_response = json.loads(archived_response, object_hook=frappe._dict)
+    except json.JSONDecodeError:
+        return
 
-    return response.result
+    return archived_response.result
 
 
 def _get_address(address):
@@ -181,7 +187,7 @@ def _extract_address_lines(address):
     return address_line1, address_line2
 
 
-def fetch_gstin_status(*, gstin=None, throw=True):
+def fetch_gstin_status(*, gstin=None, doc=None, throw=True):
     """
     Fetch GSTIN status from E-Invoice API or Public API
 
@@ -190,7 +196,7 @@ def fetch_gstin_status(*, gstin=None, throw=True):
     :param gstin: GSTIN to fetch status for
     :param throw: Raise exception if error occurs (used for user initiated requests)
     """
-    validate_gstin(gstin)
+    gstin = validate_gstin(gstin)
 
     try:
         if not throw and frappe.cache.get_value("gst_server_error"):
@@ -200,10 +206,12 @@ def fetch_gstin_status(*, gstin=None, throw=True):
         company_gstin = gst_settings.get_gstin_with_credentials(service="e-Invoice")
 
         if throw or not company_gstin:
-            response = PublicAPI().get_gstin_info(gstin)
+            response = PublicAPI(doc).get_gstin_info(gstin)
             return get_formatted_response_for_status(response)
 
-        response = EInvoiceAPI(company_gstin=company_gstin).get_gstin_info(gstin)
+        doc = doc or frappe._dict()
+        doc.company_gstin = company_gstin
+        response = EInvoiceAPI(doc=doc).get_gstin_info(gstin)
         return frappe._dict(
             {
                 "gstin": gstin,
@@ -246,7 +254,7 @@ def get_formatted_response_for_status(response):
     )
 
 
-def fetch_transporter_id_status(transporter_id, throw=True):
+def fetch_transporter_id_status(transporter_id, doc=None, throw=True):
     """
     Fetch Transporter ID status from E-Waybill API
 
@@ -257,15 +265,15 @@ def fetch_transporter_id_status(transporter_id, throw=True):
         return
 
     gst_settings = frappe.get_cached_doc("GST Settings", None)
-    company_gstin = gst_settings.get_gstin_with_credentials(service="e-Waybill")
+    doc = doc or frappe._dict()
+    doc.company_gstin = gst_settings.get_gstin_with_credentials(service="e-Waybill")
 
-    if not company_gstin:
+    if not doc.company_gstin:
         return
 
     try:
-        response = EWaybillAPI(company_gstin=company_gstin).get_transporter_details(
-            transporter_id
-        )
+        # fetched using first credentials
+        response = EWaybillAPI(doc=doc).get_transporter_details(transporter_id)
 
     except Exception as e:
         if throw:
@@ -317,21 +325,28 @@ def get_gstr_1_return_status(company, gstin, period, year_increment=0):
             return info["status"]
 
     # late filing possibility (limitation: only checks for the next FY: good enough)
-    if not year_increment and get_current_fy() != fy:
+    if not year_increment and get_previous_period_fy() != fy:
         get_gstr_1_return_status(company, gstin, period, year_increment=1)
 
     return "Not Filed"
 
 
 def update_gstr_returns_info(company, gstin, fy=None):
+    if frappe.flags.in_test:
+        return
+
     if not fy:
-        fy = get_current_fy()
+        fy = get_previous_period_fy()
 
     response = PublicAPI().get_returns_info(gstin, fy)
     if not response:
         return
 
-    e_filed_list = response.get("EFiledlist")
+    e_filed_list = response.get("EFiledlist") or []
+
+    from india_compliance.gst_india.doctype.gst_return_log.gst_return_log import (
+        process_gstr_returns_info,
+    )
 
     # If api call is made then update logs for GSTR1 AND GSTR3B
     frappe.enqueue(
@@ -368,6 +383,95 @@ def get_latest_3b_filed_period(company, company_gstin):
     )
 
 
+####################################################################################################
+#### GSTIN FILING PREFERENCE ######################################################################
+####################################################################################################
+
+
+@frappe.whitelist()
+@otp_handler
+def get_and_update_filing_preference(gstin, period):
+    frappe.has_permission("GST Return Log", throw=True)
+
+    response = fetch_filing_preference(gstin, get_fy(period))
+
+    # update GST Return Log
+    create_or_update_logs_for_year(gstin, period, response)
+
+    return get_filing_preference(period, response)
+
+
+@request_cache
+def fetch_filing_preference(gstin, fy):
+    api = GSTR1API(company_gstin=gstin)
+    response = api.fetch_filing_preference(fy=fy)
+
+    return response
+
+
+def create_or_update_logs_for_year(gstin, period, response):
+    log_names = get_logs_for_year(gstin, period)
+    existing_log = frappe._dict(
+        frappe.get_all(
+            "GST Return Log",
+            filters={"name": ["in", log_names]},
+            fields=["name", "filing_preference"],
+            as_list=True,
+        )
+    )
+
+    for log_name in log_names:
+        period = log_name.split("-")[1]
+        filing_preference = get_filing_preference(period, response)
+
+        if not filing_preference:
+            continue
+
+        if log_name in existing_log:
+            if existing_log[log_name] == filing_preference:
+                continue
+
+            # books may need a refresh
+            frappe.db.set_value(
+                "GST Return Log",
+                log_name,
+                {"filing_preference": filing_preference, "is_latest_data": 0},
+            )
+            continue
+
+        frappe.get_doc(
+            {
+                "doctype": "GST Return Log",
+                "name": log_name,
+                "return_type": log_name.split("-")[0],
+                "filing_preference": filing_preference,
+                "return_period": log_name.split("-")[1],
+                "gstin": gstin,
+            }
+        ).insert()
+
+    # patch
+    from india_compliance.patches.v15.update_return_logs_with_filing_preference import (
+        patch_filing_preference,
+    )
+
+    patch_filing_preference(gstin)
+
+
+def get_filing_preference(period, response):
+    quarter = get_financial_quarter(cint(period[:2]))
+    for data in response:
+        if data.get("quarter") == f"Q{quarter}":
+            return "Quarterly" if data.get("preference") == "Q" else "Monthly"
+
+    return None
+
+
+####################################################################################################
+#### GSTIN UTILITIES ###############################################################################
+####################################################################################################
+
+
 def get_fy(period, year_increment=0):
     month, year = period[:2], period[2:]
     year = str(int(year) + year_increment)
@@ -379,6 +483,36 @@ def get_fy(period, year_increment=0):
         return f"{year}-{int(year[-2:]) + 1}"
 
 
-def get_current_fy():
-    period = getdate().strftime("%m%Y")
+def get_previous_period_fy():
+    # Best possible scenario is that the return was filed in the previous period.
+    period = add_to_date(None, months=-1).strftime("%m%Y")
     return get_fy(period)
+
+
+def get_logs_for_year(gstin, period):
+    year = cint(period[2:])
+    month = cint(period[:2])
+    logs = []
+
+    if month <= 3:
+        year -= 1
+
+    for return_type in ["GSTR1", "GSTR3B"]:
+        for current_month in range(1, 13):
+            current_year = year if current_month >= 4 else year + 1
+            logs.append(f"{return_type}-{current_month:02d}{current_year}-{gstin}")
+
+    return logs
+
+
+def get_financial_quarter(month):
+    if month in [4, 5, 6]:
+        return 1  # April, May, June
+    elif month in [7, 8, 9]:
+        return 2  # July, August, September
+    elif month in [10, 11, 12]:
+        return 3  # October, November, December
+    elif month in [1, 2, 3]:
+        return 4  # January, February, March
+    else:
+        raise ValueError("Month must be between 1 and 12")

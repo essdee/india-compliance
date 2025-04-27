@@ -18,7 +18,9 @@ GST_TAX_TYPES = tuple(field[:-8] for field in GST_ACCOUNT_FIELDS)
 
 GST_RCM_TAX_TYPES = tuple(tax_type + "_rcm" for tax_type in GST_TAX_TYPES)
 
-TAX_TYPES = (*GST_TAX_TYPES, *GST_RCM_TAX_TYPES)
+GST_REFUND_TAX_TYPES = tuple(tax_type + "_refund" for tax_type in GST_TAX_TYPES)
+
+TAX_TYPES = (*GST_TAX_TYPES, *GST_RCM_TAX_TYPES, *GST_REFUND_TAX_TYPES)
 
 GST_PARTY_TYPES = ("Customer", "Supplier", "Company")
 
@@ -38,10 +40,10 @@ GST_CATEGORIES = {
 
 GST_CATEGORY_MAP = {
     "R": "Regular",
-    "SEZWP": "SEZ supplies with payment of tax",
-    "SEZWOP": "SEZ supplies with out payment of tax",
-    "DE": "Deemed exports",
-    "CBW": "Intra-State Supplies attracting IGST",
+    "SEZWP": "SEZ With Payment of Tax",
+    "SEZWOP": "SEZ Without Payment of Tax",
+    "DE": "Deemed Export",
+    "CBW": "Intra-State Supplies Attracting IGST",
 }
 
 ACTION_MAP = {"A": "Accepted", "R": "Rejected", "P": "Pending", "N": "No Action"}
@@ -57,6 +59,9 @@ EXPORT_TYPES = (
     "WOP",  # Without Payment of Tax [0]
     "WP",  # With Payment of Tax [1]
 )
+
+TAXABLE_GST_TREATMENTS = ("Taxable", "Zero-Rated")
+
 
 STATE_NUMBERS = {
     "Andaman and Nicobar Islands": "35",

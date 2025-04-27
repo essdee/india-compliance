@@ -1,4 +1,5 @@
 import copy
+import functools
 import io
 import tarfile
 
@@ -590,6 +591,9 @@ def get_gst_account_gst_tax_type_map():
             if row.account_type and row.account_type.endswith("Reverse Charge"):
                 account_key = account_key + "_rcm"
 
+            if row.account_type and row.account_type.endswith("Refund"):
+                account_key = account_key + "_refund"
+
             gst_account_map[account_value] = account_key
 
     return gst_account_map
@@ -1013,6 +1017,9 @@ def get_month_or_quarter_dict():
     }
 
 
+MONTHS = list(get_month_or_quarter_dict().keys())[4:]
+
+
 def get_period(month_or_quarter, year=None):
     month_or_quarter_no = get_month_or_quarter_dict().get(month_or_quarter)
 
@@ -1058,3 +1065,18 @@ def create_notification(
         }
     )
     notification.insert()
+
+
+def enable_autocommit(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        db = frappe.local.db
+        autocommit = db.auto_commit_on_many_writes
+        db.auto_commit_on_many_writes = 1
+
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            db.auto_commit_on_many_writes = autocommit
+
+    return wrapper

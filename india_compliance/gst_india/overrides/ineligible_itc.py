@@ -305,7 +305,10 @@ class IneligibleITC:
         item._ineligible_tax_amount = ineligible_tax_amount
 
     def update_item_valuation_rate(self, item, ineligible_tax_amount):
-        item.valuation_rate += flt(ineligible_tax_amount / item.stock_qty, 2)
+        item.valuation_rate = flt(
+            item.valuation_rate + ineligible_tax_amount / item.stock_qty,
+            item.precision("valuation_rate"),
+        )
 
     def is_debit_entry_required(self, item):
         return True
@@ -401,9 +404,11 @@ class BillOfEntry(IneligibleITC):
     def update_valuation_rate(self):
         # Update fixed assets
         asset_items = self.doc.get_asset_items()
+
+        purchase_invoices = [item.purchase_invoice for item in self.doc.items]
         expense_account = frappe.db.get_values(
             "Purchase Invoice Item",
-            {"parent": self.doc.purchase_invoice},
+            {"parent": ["in", purchase_invoices]},
             ["expense_account", "name"],
             as_dict=True,
         )
@@ -444,7 +449,7 @@ class BillOfEntry(IneligibleITC):
                 continue
 
             total_gst_expense += gst_expense
-            item.applicable_charges += gst_expense / item.qty
+            item.applicable_charges += gst_expense
 
         if total_gst_expense == 0:
             return
