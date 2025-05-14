@@ -341,7 +341,7 @@ class TaxpayerBaseAPI(TaxpayerAuthenticate):
             if response.error_type in ["otp_requested", "invalid_otp"]:
                 return response
 
-        headers = {"auth-token": auth_token}
+        headers = {"auth-token": auth_token, "requestid" : f"essdee{now_datetime().timestamp()}".replace('.', "")}
         if return_type:
             headers["rtn_typ"] = return_type
             headers["userrole"] = return_type
