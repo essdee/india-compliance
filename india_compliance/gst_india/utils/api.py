@@ -22,7 +22,7 @@ def create_integration_request(
     doc = frappe.get_doc(
         {
             "doctype": "Integration Request",
-            "integration_request_service": "India Compliance API",
+            "integration_request_service": "Adaequare API",
             "request_id": request_id,
             "url": url,
             "request_headers": pretty_json(request_headers),
