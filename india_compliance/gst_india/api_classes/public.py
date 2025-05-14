@@ -6,7 +6,7 @@ from india_compliance.gst_india.api_classes.base import BaseAPI
 
 class PublicAPI(BaseAPI):
     API_NAME = "GST Public"
-    BASE_PATH = "commonapi"
+    BASE_PATH = "enriched/commonapi"
     IGNORED_ERROR_CODES = {
         "RET13510": "no_docs_found",
         "FO8000": "no_docs_found",
