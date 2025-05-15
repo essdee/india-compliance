@@ -403,7 +403,7 @@ def download_gstr(
         raise OTPRequestedError
     except Exception as e:
         frappe.log_error(
-            f"Failed to download {return_type.value} for {company_gstin} for {periods}: {str(e)}")
+            f"Failed to download")
         frappe.publish_realtime(
             "gstr_2a_2b_download_message",
             {
