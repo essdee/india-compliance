@@ -441,6 +441,9 @@ class TaxpayerBaseAPI(TaxpayerAuthenticate):
     def is_ignored_error(self, response):
         error_code = response.get("error", {}).get("error_cd")
 
+        if not error_code:
+            error_code = response.get('errorCode', None)
+
         if error_code in self.IGNORED_ERROR_CODES:
             response.error_type = self.IGNORED_ERROR_CODES[error_code]
             response.gstin = self.company_gstin
