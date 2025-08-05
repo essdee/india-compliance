@@ -35,7 +35,17 @@ frappe.query_reports["HSN-wise-summary of outward supplies"] = {
 			"label": __("From Date"),
 			"fieldtype": "Date",
 			"width": "80",
-			"default": india_compliance.last_month_start()
+			"default": india_compliance.last_month_start(),
+			on_change: report => {
+				let { from_date } = report.get_values();
+				from_date = frappe.datetime.str_to_obj(from_date);
+
+				if (india_compliance.HSN_BIFURCATION_FROM <= from_date) {
+					report.set_filter_value("bifurcate_hsn", 1);
+				} else {
+					report.set_filter_value("bifurcate_hsn", 0);
+				}
+			}
 		},
 		{
 			"fieldname":"to_date",
@@ -44,6 +54,11 @@ frappe.query_reports["HSN-wise-summary of outward supplies"] = {
 			"width": "80",
 			"mandatory_depends_on": "eval: doc.from_date",
 			"default": india_compliance.last_month_end()
+		},
+		{
+			"fieldname":"bifurcate_hsn",
+			"label": __("Bifurcate HSN Summary"),
+			"fieldtype": "Check",
 		},
 
 	],

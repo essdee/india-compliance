@@ -13,12 +13,12 @@ VERSIONS_TO_COMPARE = [
     {
         "app_name": "Frappe",
         "current_version": version.parse(frappe.__version__),
-        "required_versions": {"version-14": "14.57.0", "version-15": "15.3.0"},
+        "required_versions": {"version-14": "14.57.0", "version-15": "15.50.0"},
     },
     {
         "app_name": "ERPNext",
         "current_version": version.parse(erpnext.__version__),
-        "required_versions": {"version-14": "14.70.7", "version-15": "15.45.5"},
+        "required_versions": {"version-14": "14.70.7", "version-15": "15.60.0"},
     },
 ]
 
@@ -34,6 +34,8 @@ def execute():
                 f"{app_name} version {app_version} not compatible with India Compliance {IC_VERSION}\n"
                 f"Please switch to version {IC_VERSION.major} of {app_name} to use the current version of"
                 " India Compliance.\n"
+                "Alternatively, you may need to change the version of India Compliance App to"
+                f" version {app_version.major} to match your {app_name} version.\n"
             )
 
         if IC_VERSION.major == 16:
@@ -53,6 +55,8 @@ def execute():
                 f"{app_name} version {app_version} not compatible with India Compliance {IC_VERSION}\n"
                 f"Please upgrade {app_name} to version {required_version} or above to use the current version of"
                 " India Compliance.\n"
+                f"Alternatively, you may need to downgrade the version of India Compliance App to {app_version}"
+                f" to match your {app_name} version.\n"
             )
 
 

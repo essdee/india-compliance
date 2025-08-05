@@ -11,8 +11,8 @@ from frappe.utils import add_to_date, cint
 
 from india_compliance.exceptions import GSPServerError
 from india_compliance.gst_india.api_classes.base import BASE_URL
-from india_compliance.gst_india.api_classes.e_invoice import EInvoiceAPI
-from india_compliance.gst_india.api_classes.e_waybill import EWaybillAPI
+from india_compliance.gst_india.api_classes.nic.e_invoice import EInvoiceAPI
+from india_compliance.gst_india.api_classes.nic.e_waybill import EWaybillAPI
 from india_compliance.gst_india.api_classes.public import PublicAPI
 from india_compliance.gst_india.api_classes.taxpayer_base import (
     otp_handler,
@@ -78,7 +78,9 @@ def _get_gstin_info(gstin, *, doc=None, throw_error=True):
             return frappe._dict()
 
     business_name = (
-        response.tradeNam if response.ctb == "Proprietorship" else response.lgnm
+        response.tradeNam
+        if response.ctb in ["Proprietorship", "Hindu Undivided Family"]
+        else response.lgnm
     )
 
     gstin_info = frappe._dict(
@@ -211,7 +213,7 @@ def fetch_gstin_status(*, gstin=None, doc=None, throw=True):
 
         doc = doc or frappe._dict()
         doc.company_gstin = company_gstin
-        response = EInvoiceAPI(doc=doc).get_gstin_info(gstin)
+        response = EInvoiceAPI.create(doc=doc).get_gstin_info(gstin)
         return frappe._dict(
             {
                 "gstin": gstin,
@@ -273,7 +275,7 @@ def fetch_transporter_id_status(transporter_id, doc=None, throw=True):
 
     try:
         # fetched using first credentials
-        response = EWaybillAPI(doc=doc).get_transporter_details(transporter_id)
+        response = EWaybillAPI.create(doc=doc).get_transporter_details(transporter_id)
 
     except Exception as e:
         if throw:
@@ -299,7 +301,7 @@ def fetch_transporter_id_status(transporter_id, doc=None, throw=True):
 # "Input Service Distributor (ISD)"         29AABCF8078M2ZW     Flipkart
 # "Tax Deductor"                            06DELI09652G1DA 09ALDN00287A1DD 27AAFT56212B1DO 19AAACI1681G1DV
 # "SEZ Developer"                           27AAJCS5738D1Z6
-# "United Nation Body"                      0717UNO00157UNO 0717UNO00211UN2 2117UNO00002UNF
+# "United Nation Body"                      0717UNO00157UNO 0717UNO00211UN2 2117UNO00002UNF 3317USA00002UNE
 # "Consulate or Embassy of Foreign Country" 0717UNO00154UNU
 # "Tax Collector (e-Commerce Operator)"     29AABCF8078M1C8 27AAECG3736E1C2 29AAFCB7707D1C1
 

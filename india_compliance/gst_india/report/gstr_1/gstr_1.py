@@ -1255,7 +1255,11 @@ class GSTR11A11BData:
         data = {}
         for entry in records:
             taxable_value = flt(entry.taxable_value, 2)
-            tax_rate = round(((entry.tax_amount / taxable_value) * 100))
+            tax_rate = (
+                round(((entry.tax_amount / taxable_value) * 100))
+                if taxable_value
+                else 0
+            )
 
             data.setdefault((entry.place_of_supply, tax_rate), [0.0, 0.0])
 
@@ -1507,10 +1511,7 @@ class GSTR1DocumentIssuedSummary:
         if suffix_length:
             n_0, n_1 = n_0[:-suffix_length], n_1[:-suffix_length]
 
-        if cint(n_1) - cint(n_0) != 1:
-            return False
-
-        return True
+        return cint(n_1) - cint(n_0) == 1
 
     def seperate_data_by_nature_of_document(self, data, doctype):
         nature_of_document = {
@@ -1684,7 +1685,7 @@ def get_json(type_of_business, gstin, data, filters):
         return get_document_issued_summary_json(data)
 
     if type_of_business == "HSN":
-        return get_hsn_wise_json_data(data)
+        return get_hsn_wise_json_data(data, filters)
 
     if type_of_business == "Section 14":
         res.setdefault("superco", {})
@@ -1978,13 +1979,13 @@ def get_exempted_json(data):
 
     for i, v in enumerate(data):
         if data[i].get("nil_rated"):
-            out["inv"][i]["nil_amt"] = data[i]["nil_rated"]
+            out["inv"][i]["nil_amt"] = flt(data[i]["nil_rated"], 2)
 
         if data[i].get("exempted"):
-            out["inv"][i]["expt_amt"] = data[i]["exempted"]
+            out["inv"][i]["expt_amt"] = flt(data[i]["exempted"], 2)
 
         if data[i].get("non_gst"):
-            out["inv"][i]["ngsup_amt"] = data[i]["non_gst"]
+            out["inv"][i]["ngsup_amt"] = flt(data[i]["non_gst"], 2)
 
     return out
 
@@ -2214,7 +2215,10 @@ def get_gstr1_excel(filters, data=None, columns=None):
         if type_of_business == "Document Issued Summary":
             format_doc_issued_excel_data(headers, data)
 
-        create_excel_sheet(excel, type_of_business, headers, data)
+        if type_of_business == "HSN" and filters.get("bifurcate_hsn"):
+            create_hsn_excel_sheet(excel, headers, data)
+        else:
+            create_excel_sheet(excel, type_of_business, headers, data)
 
     else:
         for type_of_business in report_types:
@@ -2226,6 +2230,10 @@ def get_gstr1_excel(filters, data=None, columns=None):
 
             if type_of_business == "Document Issued Summary":
                 format_doc_issued_excel_data(headers, data)
+
+            if type_of_business == "HSN" and filters.get("bifurcate_hsn"):
+                create_hsn_excel_sheet(excel, headers, data)
+                continue
 
             create_excel_sheet(excel, type_of_business, headers, data)
 
@@ -2250,6 +2258,22 @@ def format_doc_issued_excel_data(headers, data):
 
     if total_draft_idx is not None:
         headers.pop(total_draft_idx)
+
+
+def create_hsn_excel_sheet(excel, headers, data):
+    b2b_data = []
+    b2c_data = []
+    for row in data:
+        if row.get("invoice_type") == "B2B":
+            b2b_data.append(row)
+        else:
+            b2c_data.append(row)
+
+    if b2b_data:
+        create_excel_sheet(excel, "HSN - B2B", headers, b2b_data)
+
+    if b2c_data:
+        create_excel_sheet(excel, "HSN - B2C", headers, b2c_data)
 
 
 def create_excel_sheet(excel, sheet_name, headers, data):
