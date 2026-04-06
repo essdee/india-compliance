@@ -11,15 +11,13 @@ class EwaybillApplicability {
 
         if (!this.frm.doc.company_gstin) {
             is_ewb_applicable = false;
-            message_list.push(
-                "Company GSTIN is not set. Ensure its set in Company Address."
-            );
+            message_list.push("Company GSTIN is not set. Ensure its set in Company Address.");
         }
 
         if (this.frm.doc.is_opening === "Yes") {
             is_ewb_applicable = false;
             message_list.push(
-                "e-Waybill cannot be generated for transaction with 'Is Opening Entry' set to Yes."
+                "e-Waybill cannot be generated for transaction with 'Is Opening Entry' set to Yes.",
             );
         }
 
@@ -28,9 +26,7 @@ class EwaybillApplicability {
 
         this.frm._ewb_message = "";
         if (show_message) {
-            this.frm._ewb_message = message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message = message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_applicable;
@@ -39,11 +35,7 @@ class EwaybillApplicability {
     has_goods_item(is_ewb_applicable, message_list) {
         let has_goods_item = false;
         for (const item of this.frm.doc.items) {
-            if (
-                item.gst_hsn_code &&
-                !item.gst_hsn_code.startsWith("99") &&
-                item.qty !== 0
-            ) {
+            if (item.gst_hsn_code && !item.gst_hsn_code.startsWith("99") && item.qty !== 0) {
                 has_goods_item = true;
                 break;
             }
@@ -61,9 +53,7 @@ class EwaybillApplicability {
         let is_ewb_applicable = this.is_e_waybill_applicable(show_message);
         let message_list = [];
 
-        let is_invalid_invoice_number = india_compliance.validate_invoice_number(
-            this.frm.doc.name
-        );
+        let is_invalid_invoice_number = india_compliance.validate_invoice_number(this.frm.doc.name);
 
         if (is_invalid_invoice_number.length > 0) {
             is_ewb_applicable = false;
@@ -71,9 +61,7 @@ class EwaybillApplicability {
         }
 
         if (!is_ewb_applicable) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_applicable;
@@ -104,15 +92,13 @@ class SalesInvoiceEwaybill extends EwaybillApplicability {
         }
 
         if (show_message) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_generatable;
     }
 
-    auto_generate_e_waybill() {
+    async auto_generate_e_waybill() {
         if (
             this.frm.doc.is_return ||
             this.frm.doc.is_debit_note ||
@@ -120,7 +106,7 @@ class SalesInvoiceEwaybill extends EwaybillApplicability {
             !india_compliance.is_api_enabled() ||
             !gst_settings.auto_generate_e_waybill ||
             !this.is_e_waybill_generatable() ||
-            !has_e_waybill_threshold_met(this.frm) ||
+            !(await has_e_waybill_threshold_met(this.frm)) ||
             is_e_invoice_applicable(this.frm)
         )
             return false;
@@ -131,10 +117,7 @@ class SalesInvoiceEwaybill extends EwaybillApplicability {
 
 class PurchaseInvoiceEwaybill extends EwaybillApplicability {
     is_e_waybill_applicable(show_message = false) {
-        return (
-            super.is_e_waybill_applicable(show_message) &&
-            gst_settings.enable_e_waybill_from_pi
-        );
+        return super.is_e_waybill_applicable(show_message) && gst_settings.enable_e_waybill_from_pi;
     }
 
     is_e_waybill_generatable(show_message = false) {
@@ -152,28 +135,20 @@ class PurchaseInvoiceEwaybill extends EwaybillApplicability {
         }
 
         if (show_message) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_generatable;
     }
 
     is_e_waybill_api_enabled() {
-        return (
-            super.is_e_waybill_api_enabled() && gst_settings.enable_e_waybill_from_pi
-        );
+        return super.is_e_waybill_api_enabled() && gst_settings.enable_e_waybill_from_pi;
     }
 }
 
-
 class PurchaseReceiptEwaybill extends EwaybillApplicability {
     is_e_waybill_applicable(show_message = false) {
-        return (
-            super.is_e_waybill_applicable(show_message) &&
-            gst_settings.enable_e_waybill_from_pr
-        );
+        return super.is_e_waybill_applicable(show_message) && gst_settings.enable_e_waybill_from_pr;
     }
 
     is_e_waybill_generatable(show_message = false) {
@@ -191,27 +166,20 @@ class PurchaseReceiptEwaybill extends EwaybillApplicability {
         }
 
         if (show_message) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_generatable;
     }
 
     is_e_waybill_api_enabled() {
-        return (
-            super.is_e_waybill_api_enabled() && gst_settings.enable_e_waybill_from_pr
-        );
+        return super.is_e_waybill_api_enabled() && gst_settings.enable_e_waybill_from_pr;
     }
 }
 
 class DeliveryNoteEwaybill extends EwaybillApplicability {
     is_e_waybill_applicable(show_message = false) {
-        return (
-            super.is_e_waybill_applicable(show_message) &&
-            gst_settings.enable_e_waybill_from_dn
-        );
+        return super.is_e_waybill_applicable(show_message) && gst_settings.enable_e_waybill_from_dn;
     }
 
     is_e_waybill_generatable(show_message = false) {
@@ -224,18 +192,14 @@ class DeliveryNoteEwaybill extends EwaybillApplicability {
         }
 
         if (show_message) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_generatable;
     }
 
     is_e_waybill_api_enabled() {
-        return (
-            super.is_e_waybill_api_enabled() && gst_settings.enable_e_waybill_from_dn
-        );
+        return super.is_e_waybill_api_enabled() && gst_settings.enable_e_waybill_from_dn;
     }
 }
 
@@ -244,9 +208,7 @@ class StockEntryEwaybill extends EwaybillApplicability {
         if (
             !gst_settings.enable_e_waybill ||
             !gst_settings.enable_e_waybill_for_sc ||
-            !["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(
-                this.frm.doc.purpose
-            )
+            !["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(this.frm.doc.purpose)
         )
             return false;
 
@@ -256,37 +218,26 @@ class StockEntryEwaybill extends EwaybillApplicability {
 
         if (is_return && !this.frm.doc.bill_to_gstin) {
             is_ewb_applicable = false;
-            message_list.push(
-                "Bill To GSTIN is not set. Ensure its set in Bill To Address."
-            );
+            message_list.push("Bill To GSTIN is not set. Ensure its set in Bill To Address.");
         }
 
         if (!is_return && !this.frm.doc.bill_from_gstin) {
             is_ewb_applicable = false;
-            message_list.push(
-                "Bill From GSTIN is not set. Ensure its set in Bill From Address."
-            );
+            message_list.push("Bill From GSTIN is not set. Ensure its set in Bill From Address.");
         }
 
         const same_gstin = this.frm.doc.bill_from_gstin === this.frm.doc.bill_to_gstin;
-        const applicable_for_same_gstin = !(
-            is_return || this.frm.doc.purpose === "Send to Subcontractor"
-        );
+        const applicable_for_same_gstin = !(is_return || this.frm.doc.purpose === "Send to Subcontractor");
 
         if (same_gstin && !applicable_for_same_gstin) {
             is_ewb_applicable = false;
             message_list.push("Bill From GSTIN and Bill To GSTIN are same.");
         }
 
-        if (!same_gstin && applicable_for_same_gstin) {
-            is_ewb_applicable = false;
-            message_list.push("Bill From GSTIN and Bill To GSTIN are different.");
-        }
-
         if (this.frm.doc.is_opening === "Yes") {
             is_ewb_applicable = false;
             message_list.push(
-                "e-Waybill cannot be generated for transaction with 'Is Opening Entry' set to Yes."
+                "e-Waybill cannot be generated for transaction with 'Is Opening Entry' set to Yes.",
             );
         }
 
@@ -296,9 +247,7 @@ class StockEntryEwaybill extends EwaybillApplicability {
         this.frm._ewb_message = "";
 
         if (show_message) {
-            this.frm._ewb_message = message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message = message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_applicable;
@@ -315,9 +264,7 @@ class StockEntryEwaybill extends EwaybillApplicability {
         }
 
         if (show_message) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_generatable;
@@ -325,9 +272,7 @@ class StockEntryEwaybill extends EwaybillApplicability {
 
     is_e_waybill_api_enabled() {
         return (
-            ["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(
-                this.frm.doc.purpose
-            ) &&
+            ["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(this.frm.doc.purpose) &&
             super.is_e_waybill_api_enabled() &&
             gst_settings.enable_e_waybill_for_sc
         );
@@ -336,10 +281,7 @@ class StockEntryEwaybill extends EwaybillApplicability {
 
 class SubcontractingReceiptEwaybill extends EwaybillApplicability {
     is_e_waybill_applicable(show_message = false) {
-        return (
-            super.is_e_waybill_applicable(show_message) &&
-            gst_settings.enable_e_waybill_for_sc
-        );
+        return super.is_e_waybill_applicable(show_message) && gst_settings.enable_e_waybill_for_sc;
     }
 
     is_e_waybill_generatable(show_message = false) {
@@ -349,15 +291,11 @@ class SubcontractingReceiptEwaybill extends EwaybillApplicability {
 
         if (!this.frm.doc.supplier_address) {
             is_ewb_generatable = false;
-            message_list.push(
-                "Supplier addresss is mandatory for e-waybill generation."
-            );
+            message_list.push("Supplier addresss is mandatory for e-waybill generation.");
         }
 
         if (show_message) {
-            this.frm._ewb_message += message_list
-                .map(message => `<li>${message}</li>`)
-                .join("");
+            this.frm._ewb_message += message_list.map((message) => `<li>${message}</li>`).join("");
         }
 
         return is_ewb_generatable;

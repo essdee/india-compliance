@@ -1,5 +1,6 @@
 import base64
 import re
+from typing import ClassVar
 
 import frappe
 from frappe import _
@@ -11,15 +12,13 @@ from india_compliance.gst_india.constants import DISTANCE_REGEX
 
 class EInvoiceAPI(BaseAPI):
     API_NAME = "e-Invoice"
-    SENSITIVE_INFO = BaseAPI.SENSITIVE_INFO + ("password", "Password", "AppKey")
-    IGNORED_ERROR_CODES = {
+    SENSITIVE_INFO: ClassVar[tuple] = (*BaseAPI.SENSITIVE_INFO, "password", "Password", "AppKey")
+    IGNORED_ERROR_CODES: ClassVar[dict] = {
         "1005": "Invalid Token",
         # Generate IRN errors
         "2150": "Duplicate IRN",
         # Get e-Invoice by IRN errors
-        "2283": (
-            "IRN details cannot be provided as it is generated more than 2 days ago"
-        ),
+        "2283": ("IRN details cannot be provided as it is generated more than 2 days ago"),
         # Cancel IRN errors
         "9999": "Invoice is not active",
         "4002": "EwayBill is already generated for this IRN",
@@ -88,6 +87,7 @@ class EInvoiceAPI(BaseAPI):
         for error_code in self.IGNORED_ERROR_CODES:
             if message.startswith(error_code):
                 response_json.error_code = error_code
+                response_json.error_message = message
                 return True
 
         return False
@@ -101,11 +101,14 @@ class EInvoiceAPI(BaseAPI):
     def generate_irn(self, data):
         result = self.post(endpoint="invoice", json=data)
 
-        # In case of Duplicate IRN, result is a list
-        if isinstance(result, list):
-            result = result[0]
+        # Handle duplicate IRN scenarios
+        result = self.handle_duplicate_irn_response(result)
 
         self.update_distance(result)
+        return result
+
+    def handle_duplicate_irn_response(self, result):
+        # This method will be overridden in subclasses
         return result
 
     def cancel_irn(self, data):
@@ -161,6 +164,13 @@ class EnrichedEInvoiceAPI(EInvoiceAPI):
     def get_response_info(self):
         return self.response.get("info")
 
+    def handle_duplicate_irn_response(self, result):
+        if isinstance(result, list):
+            dup_info = next((info for info in result if info.get("InfCd") == "DUPIRN"), None)
+            result = dup_info or result[0]
+
+        return result
+
 
 class StandardEInvoiceAPI(EInvoiceAPI):
     BASE_PATH = "standard/ei/api"
@@ -171,12 +181,12 @@ class StandardEInvoiceAPI(EInvoiceAPI):
         if not self.company_gstin:
             frappe.throw(_("Company GSTIN is required to use the e-Invoice API"))
 
-        self.fetch_credentials(self.company_gstin, "e-Waybill / e-Invoice")
-        self.app_key = base64.b64encode(self.app_key.encode()).decode()
-        self.set_default_headers()
-
-        self.auth_strategy = StandardAuth(self)
-        self.auth_strategy.authenticate()
+        if not frappe.flags.bypass_auth:
+            self.fetch_credentials(self.company_gstin, "e-Waybill / e-Invoice")
+            self.app_key = base64.b64encode(self.app_key.encode()).decode()
+            self.set_default_headers()
+            self.auth_strategy = StandardAuth(self)
+            self.auth_strategy.authenticate()
 
     def _make_request(self, method, endpoint="", params=None, headers=None, json=None):
         response = super()._make_request(method, endpoint, params, headers, json)
@@ -217,9 +227,7 @@ class StandardEInvoiceAPI(EInvoiceAPI):
 
         # throw
         formatted_error_message = (
-            ("<br>").join(error_messages)
-            if error_messages
-            else frappe.as_json(response_json, indent=4)
+            ("<br>").join(error_messages) if error_messages else frappe.as_json(response_json, indent=4)
         )
 
         frappe.throw(
@@ -234,11 +242,22 @@ class StandardEInvoiceAPI(EInvoiceAPI):
             return False
 
         error_code = error_details[0].get("ErrorCode")
+        error_message = error_details[0].get("ErrorMessage", "")
+
         if error_code in self.IGNORED_ERROR_CODES:
             response.error_code = error_code
+            response.error_message = f"{error_code}: {error_message}"
             return True
 
         return False
 
     def get_response_info(self):
         return self.response.get("InfoDtls")
+
+    def handle_duplicate_irn_response(self, result):
+        info_details = result.get("InfoDtls")
+        if not result.Irn and isinstance(info_details, list):
+            dup_info = next((info for info in info_details if info.get("InfCd") == "DUPIRN"), None)
+            result = dup_info or info_details[0]
+
+        return result

@@ -1,14 +1,13 @@
 import json
 import re
 
-import responses
-from responses import matchers
-
 import frappe
+import responses
+from erpnext.controllers.sales_and_purchase_return import make_return_doc
 from frappe.tests.utils import FrappeTestCase, change_settings
 from frappe.utils import add_to_date, get_datetime, getdate, now_datetime
 from frappe.utils.data import format_date
-from erpnext.controllers.sales_and_purchase_return import make_return_doc
+from responses import matchers
 
 from india_compliance.gst_india.api_classes.base import BASE_URL
 from india_compliance.gst_india.overrides.test_transaction import (
@@ -48,9 +47,7 @@ class TestEInvoice(FrappeTestCase):
         )
         cls.e_invoice_test_data = frappe._dict(
             frappe.get_file_json(
-                frappe.get_app_path(
-                    "india_compliance", "gst_india", "data", "test_e_invoice.json"
-                )
+                frappe.get_app_path("india_compliance", "gst_india", "data", "test_e_invoice.json")
             )
         )
         update_dates_for_test_data(cls.e_invoice_test_data)
@@ -206,9 +203,7 @@ class TestEInvoice(FrappeTestCase):
             )
         si.save()
 
-        frappe.db.set_single_value(
-            "GST Settings", "e_invoice_applicable_from", "2021-01-01"
-        )
+        frappe.db.set_single_value("GST Settings", "e_invoice_applicable_from", "2021-01-01")
 
         self.assertRaisesRegex(
             frappe.exceptions.ValidationError,
@@ -217,8 +212,83 @@ class TestEInvoice(FrappeTestCase):
         )
 
     @responses.activate
+    @change_settings("GST Settings", {"use_fallback_for_nic": 1})
+    def test_generate_e_invoice_with_cancelled_shipping_gstin_enriched(self):
+        """Test error handling for cancelled shipping GSTIN - Enriched API (error 3029)"""
+
+        test_data = self.e_invoice_test_data.get("gstin_error_3029_cancelled")
+        si = create_sales_invoice(
+            **test_data.get("kwargs"),
+            qty=1000,
+            is_in_state=True,
+        )
+
+        error_response = test_data.get("error_response_enriched")
+
+        responses.add(
+            responses.POST,
+            BASE_URL + "/test/ei/api/invoice",
+            json=error_response,
+            status=200,
+        )
+
+        sync_gstin_response = test_data.get("sync_gstin_response_inactive")
+
+        responses.add(
+            responses.GET,
+            BASE_URL + "/test/ei/api/master/syncgstin",
+            match=[matchers.query_param_matcher({"gstin": "29AAACI1195H2ZH"})],
+            json=sync_gstin_response,
+            status=200,
+        )
+
+        with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+            generate_e_invoice(si.name)
+
+        self.assertIn("GSTIN -29AAACI1195H2ZH is inactive or cancelled", str(cm.exception))
+
+    @responses.activate
+    @change_settings("GST Settings", {"use_fallback_for_nic": 0, "sandbox_mode": 0})
+    def test_generate_e_invoice_with_cancelled_shipping_gstin_standard(self):
+        """Test error handling for cancelled shipping GSTIN - Standard API (error 3029)"""
+
+        test_data = self.e_invoice_test_data.get("gstin_error_3029_cancelled")
+        si = create_sales_invoice(
+            **test_data.get("kwargs"),
+            qty=1000,
+            is_in_state=True,
+        )
+
+        error_response = test_data.get("error_response_standard")
+
+        responses.add(
+            responses.POST,
+            BASE_URL + "/standard/ei/api/invoice",
+            json=error_response,
+            status=200,
+        )
+
+        sync_gstin_response = test_data.get("sync_gstin_response_inactive")
+
+        responses.add(
+            responses.GET,
+            BASE_URL + "/standard/ei/api/master/syncgstin",
+            match=[matchers.query_param_matcher({"gstin": "29AAACI1195H2ZH"})],
+            json=sync_gstin_response,
+            status=200,
+        )
+
+        with self.assertRaises(frappe.exceptions.ValidationError) as cm:
+            frappe.flags.bypass_auth = True
+            generate_e_invoice(si.name)
+
+        self.assertIn("GSTIN -29AAACI1195H2ZH is inactive or cancelled", str(cm.exception))
+
+    @responses.activate
     def test_generate_e_invoice_with_goods_item(self):
         """Generate test e-Invoice for goods item"""
+        frappe.db.set_single_value("GST Settings", {"auto_cancel_e_waybill": 0, "fetch_e_waybill_data": 0})
+
         test_data = self.e_invoice_test_data.get("goods_item_with_ewaybill")
 
         si = create_sales_invoice(
@@ -307,18 +377,14 @@ class TestEInvoice(FrappeTestCase):
             frappe.get_doc("e-Invoice Log", {"reference_name": si.name}),
         )
 
-        self.assertFalse(
-            frappe.db.get_value("e-Waybill Log", {"reference_name": si.name}, "name")
-        )
+        self.assertFalse(frappe.db.get_value("e-Waybill Log", {"reference_name": si.name}, "name"))
 
     @responses.activate
     def test_generate_e_invoice_with_nil_exempted_item(self):
         """Generate test e-Invoice for nil/exempted items Item"""
 
         test_data = self.e_invoice_test_data.get("nil_exempted_item")
-        si = create_sales_invoice(
-            **test_data.get("kwargs"), do_not_submit=True, is_in_state=True
-        )
+        si = create_sales_invoice(**test_data.get("kwargs"), do_not_submit=True, is_in_state=True)
 
         append_item(
             si,
@@ -366,9 +432,7 @@ class TestEInvoice(FrappeTestCase):
             frappe.get_doc("e-Invoice Log", {"reference_name": si.name}),
         )
 
-        self.assertFalse(
-            frappe.db.get_value("e-Waybill Log", {"reference_name": si.name}, "name")
-        )
+        self.assertFalse(frappe.db.get_value("e-Waybill Log", {"reference_name": si.name}, "name"))
 
     @responses.activate
     def test_credit_note_e_invoice_with_goods_item(self):
@@ -441,11 +505,7 @@ class TestEInvoice(FrappeTestCase):
             frappe.get_doc("e-Invoice Log", {"reference_name": credit_note.name}),
         )
 
-        self.assertFalse(
-            frappe.db.get_value(
-                "e-Waybill Log", {"reference_name": credit_note.name}, "name"
-            )
-        )
+        self.assertFalse(frappe.db.get_value("e-Waybill Log", {"reference_name": credit_note.name}, "name"))
 
     @responses.activate
     def test_debit_note_e_invoice_with_goods_item(self):
@@ -470,9 +530,7 @@ class TestEInvoice(FrappeTestCase):
         debit_note.submit()
 
         # Assert if request data given in Json
-        self.assertDictEqual(
-            test_data.get("request_data"), EInvoiceData(debit_note).get_data()
-        )
+        self.assertDictEqual(test_data.get("request_data"), EInvoiceData(debit_note).get_data())
 
         # Mock response for generating irn
         self._mock_e_invoice_response(data=test_data)
@@ -507,11 +565,7 @@ class TestEInvoice(FrappeTestCase):
             frappe.get_doc("e-Invoice Log", {"reference_name": debit_note.name}),
         )
 
-        self.assertFalse(
-            frappe.db.get_value(
-                "e-Waybill Log", {"reference_name": debit_note.name}, "name"
-            )
-        )
+        self.assertFalse(frappe.db.get_value("e-Waybill Log", {"reference_name": debit_note.name}, "name"))
 
     @responses.activate
     def test_cancel_e_invoice(self):
@@ -530,9 +584,7 @@ class TestEInvoice(FrappeTestCase):
             si,
         )
 
-        test_data.get("response_data").get("result").update(
-            {"AckDt": str(now_datetime())}
-        )
+        test_data.get("response_data").get("result").update({"AckDt": str(now_datetime())})
 
         # Assert if request data given in Json
         self.assertDictEqual(test_data.get("request_data"), EInvoiceData(si).get_data())
@@ -569,9 +621,7 @@ class TestEInvoice(FrappeTestCase):
             **test_data.get("kwargs"),
             is_in_state=True,
         )
-        test_data.get("response_data").get("result").update(
-            {"AckDt": str(add_to_date(days=-2))}
-        )
+        test_data.get("response_data").get("result").update({"AckDt": str(add_to_date(days=-2))})
         # Mock response for generating irnFser
         self._mock_e_invoice_response(data=test_data)
 
@@ -594,6 +644,8 @@ class TestEInvoice(FrappeTestCase):
     @responses.activate
     def test_mark_e_invoice_as_cancelled(self):
         """Test for mark e-Invoice as cancelled"""
+        frappe.db.set_single_value("GST Settings", {"auto_cancel_e_waybill": 0, "fetch_e_waybill_data": 0})
+
         test_data = self.e_invoice_test_data.get("goods_item_with_ewaybill")
 
         si = create_sales_invoice(
@@ -609,9 +661,7 @@ class TestEInvoice(FrappeTestCase):
         si.reload()
         si.cancel()
 
-        values = frappe._dict(
-            {"reason": "Others", "remark": "Manually deleted from GSTR-1"}
-        )
+        values = frappe._dict({"reason": "Others", "remark": "Manually deleted from GSTR-1"})
 
         mark_e_invoice_as_cancelled("Sales Invoice", si.name, values)
         cancelled_doc = frappe.get_doc("Sales Invoice", si.name)
@@ -621,9 +671,7 @@ class TestEInvoice(FrappeTestCase):
             cancelled_doc,
         )
 
-        self.assertTrue(
-            frappe.get_cached_value("e-Invoice Log", si.irn, "is_cancelled"), 1
-        )
+        self.assertTrue(frappe.get_cached_value("e-Invoice Log", si.irn, "is_cancelled"), 1)
 
     def test_validate_e_invoice_applicability(self):
         """Test if e_invoicing is applicable"""
@@ -689,9 +737,7 @@ class TestEInvoice(FrappeTestCase):
         )
         self.assertRaisesRegex(
             frappe.exceptions.ValidationError,
-            re.compile(
-                r"^(e-Invoice is not applicable for invoice with only Nil-Rated/Exempted items*)$"
-            ),
+            re.compile(r"^(e-Invoice is not applicable for invoice with only Nil-Rated/Exempted items*)$"),
             validate_e_invoice_applicability,
             si,
         )
@@ -770,6 +816,8 @@ class TestEInvoice(FrappeTestCase):
 
     @responses.activate
     def test_invoice_update_after_submit(self):
+        frappe.db.set_single_value("GST Settings", {"auto_cancel_e_waybill": 0, "fetch_e_waybill_data": 0})
+
         test_data = self.e_invoice_test_data.get("goods_item_with_ewaybill")
 
         si = create_sales_invoice(**test_data.get("kwargs"), qty=1000, is_in_state=True)
@@ -818,6 +866,150 @@ class TestEInvoice(FrappeTestCase):
             si.name,
         )
 
+    @responses.activate
+    def test_failed_e_invoice_generation(self):
+        """Test error handling when e-Invoice generation fails (empty IRN)"""
+        test_data = self.e_invoice_test_data.get("failed_e_invoice_generation")
+
+        si = create_sales_invoice(
+            rate=1000,
+            is_in_state=True,
+            company_address="_Test Indian Registered Company-Billing",
+        )
+
+        # Mock response for failed e-Invoice generation
+        self._mock_e_invoice_response(data=test_data)
+
+        # Assert that proper error is thrown when IRN is empty
+        self.assertRaisesRegex(
+            frappe.ValidationError,
+            re.compile(r"^(e-Invoice generation failed)$"),
+            generate_e_invoice,
+            si.name,
+        )
+
+        # Ensure no e-Invoice Log is created
+        self.assertFalse(frappe.db.get_value("e-Invoice Log", {"reference_name": si.name}, "name"))
+
+        # Ensure Sales Invoice status is not updated
+        si.reload()
+        self.assertEqual(si.einvoice_status, "Failed")
+
+    def test_handle_duplicate_irn_response_enriched_api(self):
+        """Test handle_duplicate_irn_response method for Enriched API"""
+        from india_compliance.gst_india.api_classes.nic.e_invoice import (
+            EnrichedEInvoiceAPI,
+        )
+
+        # Create API instance without initialization to avoid setup issues
+        api = EnrichedEInvoiceAPI.__new__(EnrichedEInvoiceAPI)
+
+        # Test case 1: Result is a list (typical for enriched API duplicate IRN)
+        result_list = [
+            frappe._dict(
+                {
+                    "InfCd": "DUPIRN",
+                    "Desc": {
+                        "Irn": "duplicate_irn_123",
+                        "AckDt": "2025-08-20 12:00:00",
+                        "AckNo": "123456789",
+                    },
+                }
+            ),
+            frappe._dict(
+                {
+                    "InfCd": "OTHER",
+                    "Desc": {"Irn": "other_irn_456", "AckDt": "2025-08-20 13:00:00"},
+                }
+            ),
+        ]
+
+        processed_result = api.handle_duplicate_irn_response(result_list)
+
+        # Should return the first DUPIRN info or first item
+        self.assertEqual(processed_result.Desc.get("Irn"), "duplicate_irn_123")
+        self.assertEqual(processed_result.InfCd, "DUPIRN")
+
+        # Test case 2: Result is already a dict (normal case)
+        result_dict = frappe._dict({"Irn": "normal_irn_789", "AckDt": "2025-08-20 14:00:00"})
+
+        processed_result = api.handle_duplicate_irn_response(result_dict)
+
+        # Should return the same dict
+        self.assertEqual(processed_result.Irn, "normal_irn_789")
+
+    def test_handle_duplicate_irn_response_standard_api(self):
+        """Test handle_duplicate_irn_response method for Standard API"""
+        from india_compliance.gst_india.api_classes.nic.e_invoice import (
+            StandardEInvoiceAPI,
+        )
+
+        # Create API instance with mock setup to avoid initialization issues
+        api = StandardEInvoiceAPI.__new__(StandardEInvoiceAPI)
+
+        # Test case 1: Empty IRN with InfoDtls containing DUPIRN
+        result_with_info_dtls = frappe._dict(
+            {
+                "Irn": "",
+                "Status": 0,
+                "InfoDtls": [
+                    {
+                        "InfCd": "DUPIRN",
+                        "Desc": {
+                            "Irn": "duplicate_irn_123",
+                            "AckDt": "2025-08-20 12:00:00",
+                            "AckNo": "123456789",
+                        },
+                    },
+                    {
+                        "InfCd": "OTHER",
+                        "Desc": {
+                            "Irn": "other_irn_456",
+                            "AckDt": "2025-08-20 13:00:00",
+                        },
+                    },
+                ],
+            }
+        )
+
+        processed_result = api.handle_duplicate_irn_response(result_with_info_dtls)
+
+        # Should return the DUPIRN info from InfoDtls
+        self.assertEqual(processed_result.get("InfCd"), "DUPIRN")
+        self.assertEqual(processed_result.get("Desc").get("Irn"), "duplicate_irn_123")
+
+        # Test case 2: Empty IRN with InfoDtls but no DUPIRN
+        result_no_dupirn = frappe._dict(
+            {
+                "Irn": "",
+                "Status": 0,
+                "InfoDtls": [
+                    {
+                        "InfCd": "OTHER",
+                        "Desc": {
+                            "Irn": "other_irn_789",
+                            "AckDt": "2025-08-20 15:00:00",
+                        },
+                    }
+                ],
+            }
+        )
+
+        processed_result = api.handle_duplicate_irn_response(result_no_dupirn)
+
+        # Should return the first item from InfoDtls
+        self.assertEqual(processed_result.get("InfCd"), "OTHER")
+        self.assertEqual(processed_result.get("Desc").get("Irn"), "other_irn_789")
+
+        # Test case 3: Normal result with IRN (no processing needed)
+        result_normal = frappe._dict({"Irn": "normal_irn_999", "AckDt": "2025-08-20 16:00:00", "Status": 1})
+
+        processed_result = api.handle_duplicate_irn_response(result_normal)
+
+        # Should return the same result unchanged
+        self.assertEqual(processed_result.Irn, "normal_irn_999")
+        self.assertEqual(processed_result.Status, 1)
+
     @change_settings("GST Settings", {"enable_overseas_transactions": 1})
     @change_settings("System Settings", {"currency_precision": 3})
     def test_refund_transaction_invoice_total(self):
@@ -840,18 +1032,14 @@ class TestEInvoice(FrappeTestCase):
         Test that a Sales Invoice cannot be cancelled if the associated e-Invoice is not cancellable configurable as per GST settings.
         """
         # Enable Setting
-        frappe.db.set_single_value(
-            "GST Settings", "restrict_cancel_if_e_invoice_final", 1
-        )
+        frappe.db.set_single_value("GST Settings", "restrict_cancel_if_e_invoice_final", 1)
 
         test_data = self.e_invoice_test_data.get("service_item")
         si = create_sales_invoice(
             **test_data.get("kwargs"),
             is_in_state=True,
         )
-        test_data.get("response_data").get("result").update(
-            {"AckDt": str(add_to_date(days=-2))}
-        )
+        test_data.get("response_data").get("result").update({"AckDt": str(add_to_date(days=-2))})
 
         # Mock response for generating irn
         self._mock_e_invoice_response(data=test_data)
@@ -861,30 +1049,22 @@ class TestEInvoice(FrappeTestCase):
 
         self.assertRaisesRegex(
             frappe.exceptions.ValidationError,
-            re.compile(
-                r"^(This document cannot be cancelled because the associated e-Invoice.*)$"
-            ),
+            re.compile(r"^(This document cannot be cancelled because the associated e-Invoice.*)$"),
             si.cancel,
         )
 
         # Disable Setting
-        frappe.db.set_single_value(
-            "GST Settings", "restrict_cancel_if_e_invoice_final", 0
-        )
+        frappe.db.set_single_value("GST Settings", "restrict_cancel_if_e_invoice_final", 0)
         si.reload()
         si.cancel()
 
     def _cancel_e_invoice(self, invoice_no):
-        values = frappe._dict(
-            {"reason": "Data Entry Mistake", "remark": "Data Entry Mistake"}
-        )
+        values = frappe._dict({"reason": "Data Entry Mistake", "remark": "Data Entry Mistake"})
         doc = load_doc("Sales Invoice", invoice_no, "cancel")
 
         # Prepared e_waybill cancel data
         cancel_e_waybill = self.e_invoice_test_data.get("cancel_e_waybill")
-        cancel_e_waybill.get("response_data").get("result").update(
-            {"ewayBillNo": doc.ewaybill}
-        )
+        cancel_e_waybill.get("response_data").get("result").update({"ewayBillNo": doc.ewaybill})
 
         # Assert for Mock request data
         self.assertDictEqual(
@@ -950,16 +1130,8 @@ def update_dates_for_test_data(test_data):
         if not (value.get("response_data") or value.get("request_data")):
             continue
 
-        response_request = (
-            value.get("request_data")
-            if isinstance(value.get("request_data"), dict)
-            else {}
-        )
-        response_result = (
-            value.get("response_data").get("result")
-            if value.get("response_data")
-            else {}
-        )
+        response_request = value.get("request_data") if isinstance(value.get("request_data"), dict) else {}
+        response_result = value.get("response_data").get("result") if value.get("response_data") else {}
 
         # Handle Duplicate IRN test data
         if isinstance(response_result, list):

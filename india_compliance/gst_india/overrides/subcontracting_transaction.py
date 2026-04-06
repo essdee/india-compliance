@@ -1,11 +1,10 @@
-from pypika import Order
-
 import frappe
+from erpnext.accounts.party import get_address_tax_category
+from erpnext.stock.get_item_details import get_item_tax_template
 from frappe import _, bold
 from frappe.contacts.doctype.address.address import get_address_display
 from frappe.utils import flt
-from erpnext.accounts.party import get_address_tax_category
-from erpnext.stock.get_item_details import get_item_tax_template
+from pypika import Order
 
 from india_compliance.gst_india.overrides.sales_invoice import (
     update_dashboard_with_gst_logs,
@@ -140,11 +139,7 @@ def set_taxes(doc):
 
 # Common Functions for Suncontracting Transactions
 def get_dashboard_data(data):
-    doctype = (
-        "Subcontracting Receipt"
-        if data.fieldname == "subcontracting_receipt"
-        else "Stock Entry"
-    )
+    doctype = "Subcontracting Receipt" if data.fieldname == "subcontracting_receipt" else "Stock Entry"
     return update_dashboard_with_gst_logs(
         doctype,
         data,
@@ -167,17 +162,21 @@ def onload(doc, method=None):
 
     gst_settings = frappe.get_cached_doc("GST Settings")
 
-    if not (
+    if (
         is_api_enabled(gst_settings)
         and gst_settings.enable_e_waybill
-        and gst_settings.enable_e_waybill_for_sc
+        and (gst_settings.enable_e_waybill_for_sc or gst_settings.auto_cancel_e_waybill)
+        and (e_waybill_info := get_e_waybill_info(doc))
     ):
-        return
-
-    doc.set_onload("e_waybill_info", get_e_waybill_info(doc))
+        doc.set_onload("e_waybill_info", e_waybill_info)
 
 
 def validate(doc, method=None):
+    field_map = (
+        STOCK_ENTRY_FIELD_MAP if doc.doctype == "Stock Entry" else SUBCONTRACTING_ORDER_RECEIPT_FIELD_MAP
+    )
+    CustomTaxController(doc, field_map).set_taxes_and_totals()
+
     if ignore_gst_validations_for_subcontracting(doc):
         return
 
@@ -186,13 +185,6 @@ def validate(doc, method=None):
 
     if doc.doctype in ("Stock Entry", "Subcontracting Receipt"):
         validate_transaction_name(doc)
-
-    field_map = (
-        STOCK_ENTRY_FIELD_MAP
-        if doc.doctype == "Stock Entry"
-        else SUBCONTRACTING_ORDER_RECEIPT_FIELD_MAP
-    )
-    CustomTaxController(doc, field_map).set_taxes_and_totals()
 
     set_gst_tax_type(doc)
     validate_taxes(doc)
@@ -223,14 +215,10 @@ def validate_doc_references(doc, method=None):
         return
 
     is_return_material_transfer = (
-        doc.doctype == "Stock Entry"
-        and doc.purpose == "Material Transfer"
-        and doc.is_return
+        doc.doctype == "Stock Entry" and doc.purpose == "Material Transfer" and doc.is_return
     )
 
-    is_subcontracting_receipt = (
-        doc.doctype == "Subcontracting Receipt" and not doc.is_return
-    )
+    is_subcontracting_receipt = doc.doctype == "Subcontracting Receipt" and not doc.is_return
 
     if not (is_return_material_transfer or is_subcontracting_receipt):
         return
@@ -296,10 +284,7 @@ def validate_transaction(doc, method=None):
     if validate_company_address_field(doc, company_address_field) is False:
         return False
 
-    if (
-        validate_mandatory_fields(doc, (company_gstin_field, "place_of_supply"))
-        is False
-    ):
+    if validate_mandatory_fields(doc, (company_gstin_field, "place_of_supply")) is False:
         return False
 
     if getattr(doc, company_address_field) and (
@@ -332,9 +317,9 @@ def validate_company_address_field(doc, company_address_field):
         validate_mandatory_fields(
             doc,
             company_address_field,
-            _(
-                "Please set {0} to ensure Company GSTIN is fetched in the transaction."
-            ).format(bold(doc.meta.get_label(company_address_field))),
+            _("Please set {0} to ensure Company GSTIN is fetched in the transaction.").format(
+                bold(doc.meta.get_label(company_address_field))
+            ),
         )
         is False
     ):
@@ -372,10 +357,9 @@ class SubcontractingGSTAccounts(GSTAccounts):
             return
 
         self._throw(
-            _(
-                "Cannot charge GST in Row #{0} since Bill From GSTIN and Bill To GSTIN are"
-                " same"
-            ).format(self.first_gst_idx)
+            _("Cannot charge GST in Row #{0} since Bill From GSTIN and Bill To GSTIN are same").format(
+                self.first_gst_idx
+            )
         )
 
     def validate_for_charge_type(self):
@@ -398,14 +382,20 @@ def set_address_display(doc):
 
 
 @frappe.whitelist()
-def get_relevant_references(filters=None):
+def get_relevant_references(filters: str | dict | frappe._dict | None = None):
+    """Permission check not required as get_list in called functions checks permissions."""
     if isinstance(filters, str):
         filters = frappe.parse_json(filters)
 
-    receipt_returns = get_subcontracting_receipt_references(filters=filters)
-    stock_entries = get_stock_entry_references(
-        filters=filters, only_linked_references=True
+    receipt_returns = get_subcontracting_receipt_references(
+        filters=filters,
+        doctype=None,
+        txt=None,
+        searchfield=None,
+        start=None,
+        page_len=None,
     )
+    stock_entries = get_stock_entry_references(filters=filters, only_linked_references=True)
 
     return {
         "Subcontracting Receipt": [row[0] for row in receipt_returns],
@@ -414,9 +404,16 @@ def get_relevant_references(filters=None):
 
 
 @frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
 def get_subcontracting_receipt_references(
-    doctype=None, txt=None, searchfield=None, start=None, page_len=None, filters=None
+    doctype: str | None = None,
+    txt: str | None = None,
+    searchfield: str | None = None,
+    start: int | None = None,
+    page_len: int | None = None,
+    filters: str | dict | frappe._dict | None = None,
 ):
+    """Permission check not required as get_list checks permissions."""
     filters = frappe._dict(filters)
 
     _filters = [
@@ -435,7 +432,7 @@ def get_subcontracting_receipt_references(
     if txt:
         _filters.append(["name", "like", f"%{txt}%"])
 
-    return frappe.db.get_all(
+    return frappe.get_list(
         "Subcontracting Receipt",
         filters=_filters,
         fields=["name", "posting_date"],
@@ -446,14 +443,15 @@ def get_subcontracting_receipt_references(
 
 @frappe.whitelist()
 def get_stock_entry_references(
-    doctype=None,
-    txt=None,
-    searchfield=None,
-    start=None,
-    page_len=None,
-    filters=None,
-    only_linked_references=False,
+    doctype: str | None = None,
+    txt: str | None = None,
+    searchfield: str | None = None,
+    start: int | None = None,
+    page_len: int | None = None,
+    filters: str | dict | frappe._dict | None = None,
+    only_linked_references: bool = False,
 ):
+    """Permission check not required as get_list checks permissions."""
     filters = frappe._dict(filters)
 
     or_filters = []
@@ -476,7 +474,7 @@ def get_stock_entry_references(
             ["subcontracting_order", "in", filters.subcontracting_orders],
         ]
 
-    return frappe.db.get_all(
+    return frappe.get_list(
         "Stock Entry",
         filters=_filters,
         or_filters=or_filters,
@@ -508,9 +506,7 @@ def is_e_waybill_applicable(doc):
     gst_settings = frappe.get_cached_doc("GST Settings")
 
     if not (
-        gst_settings.enable_api
-        and gst_settings.enable_e_waybill
-        and gst_settings.enable_e_waybill_for_sc
+        gst_settings.enable_api and gst_settings.enable_e_waybill and gst_settings.enable_e_waybill_for_sc
     ):
         return False
 

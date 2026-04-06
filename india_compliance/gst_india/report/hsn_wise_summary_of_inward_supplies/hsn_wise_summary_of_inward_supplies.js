@@ -10,7 +10,7 @@ frappe.query_reports["HSN-wise-summary of inward supplies"] = {
             options: "Company",
             reqd: 1,
             default: frappe.defaults.get_user_default("Company"),
-            on_change: report => {
+            on_change: (report) => {
                 report.set_filter_value({
                     company_gstin: "",
                 });
@@ -54,6 +54,14 @@ frappe.query_reports["HSN-wise-summary of inward supplies"] = {
             fieldtype: "Date",
             width: "80",
             default: india_compliance.last_month_end(),
+            reqd: 1,
+        },
+        {
+            fieldname: "filter_by",
+            label: __("Filter By"),
+            fieldtype: "Select",
+            default: "ITC Claim Period",
+            options: ["ITC Claim Period", "Posting Date"],
             reqd: 1,
         },
     ],

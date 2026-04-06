@@ -1,8 +1,9 @@
 import frappe
 from frappe import _, bold
 from frappe.desk.form.load import run_onload
-from frappe.utils import add_days, flt, fmt_money, get_datetime
+from frappe.utils import flt, fmt_money
 
+from india_compliance.gst_india.constants import VALID_HSN_LENGTHS
 from india_compliance.gst_india.overrides.payment_entry import get_taxes_summary
 from india_compliance.gst_india.overrides.transaction import (
     _validate_hsn_codes,
@@ -22,13 +23,14 @@ from india_compliance.gst_india.utils import (
     validate_invoice_number,
 )
 from india_compliance.gst_india.utils.e_invoice import (
-    _cancel_e_invoice,
+    auto_cancel_e_invoice,
     get_e_invoice_info,
     validate_e_invoice_applicability,
     validate_if_e_invoice_can_be_cancelled,
 )
 from india_compliance.gst_india.utils.e_waybill import (
-    _cancel_e_waybill,
+    _get_e_waybill_threshold,
+    auto_cancel_e_waybill,
     get_e_waybill_info,
 )
 from india_compliance.gst_india.utils.transaction_data import (
@@ -39,9 +41,7 @@ from india_compliance.gst_india.utils.transaction_data import (
 def onload(doc, method=None):
     if not doc.get("ewaybill"):
         if doc.gst_category == "Overseas" and is_e_waybill_applicable(doc):
-            doc.set_onload(
-                "shipping_address_in_india", is_shipping_address_in_india(doc)
-            )
+            doc.set_onload("shipping_address_in_india", is_shipping_address_in_india(doc))
 
         if not doc.get("irn"):
             return
@@ -51,11 +51,11 @@ def onload(doc, method=None):
     if not is_api_enabled(gst_settings):
         return
 
-    if gst_settings.enable_e_waybill and doc.ewaybill:
-        doc.set_onload("e_waybill_info", get_e_waybill_info(doc))
+    if gst_settings.enable_e_waybill and doc.ewaybill and (e_waybill_info := get_e_waybill_info(doc)):
+        doc.set_onload("e_waybill_info", e_waybill_info)
 
-    if gst_settings.enable_e_invoice and doc.irn:
-        doc.set_onload("e_invoice_info", get_e_invoice_info(doc))
+    if gst_settings.enable_e_invoice and doc.irn and (e_invoice_info := get_e_invoice_info(doc)):
+        doc.set_onload("e_invoice_info", e_invoice_info)
 
 
 def validate(doc, method=None):
@@ -108,7 +108,7 @@ def validate_fields_and_set_status_for_e_invoice(doc, gst_settings=None):
     # Mandatory for e-Invoice before save
     _validate_hsn_codes(
         doc,
-        valid_hsn_length=[6, 8],
+        valid_hsn_length=VALID_HSN_LENGTHS,
         message=_("Since HSN/SAC Code is mandatory for generating e-Invoices.<br>"),
     )
 
@@ -172,7 +172,6 @@ def on_submit(doc, method=None):
             enqueue_after_commit=True,
             queue="short",
             docname=doc.name,
-            throw=False,
         )
 
         return
@@ -216,21 +215,15 @@ def before_cancel(doc, method=None):
         return
 
     for reference in payment_references:
-        reverse_gst_adjusted_against_payment_entry(
-            reference.voucher_detail_no, reference.payment_name
-        )
+        reverse_gst_adjusted_against_payment_entry(reference.voucher_detail_no, reference.payment_name)
 
 
 def validate_cancellation_based_on_e_invoice(doc):
     if not doc.irn:
         return
 
-    cannot_be_cancelled = (
-        validate_if_e_invoice_can_be_cancelled(doc, throw=False) is False
-    )
-    restrict_cancel = frappe.db.get_single_value(
-        "GST Settings", "restrict_cancel_if_e_invoice_final"
-    )
+    cannot_be_cancelled = validate_if_e_invoice_can_be_cancelled(doc, throw=False) is False
+    restrict_cancel = frappe.db.get_single_value("GST Settings", "restrict_cancel_if_e_invoice_final")
 
     if cannot_be_cancelled and restrict_cancel:
         frappe.throw(
@@ -246,53 +239,30 @@ def cancel_e_waybill_e_invoice(doc, method=None):
     if not is_api_enabled(gst_settings):
         return
 
-    def auto_cancel(cancel_func, action_type):
-        if action_type == "e_invoice":
-            generated_on = (
-                doc.get_onload().get("e_invoice_info", {}).get("acknowledged_on")
-            )
-            reason = gst_settings.reason_for_e_invoice_cancellation
-
-        else:
-            generated_on = doc.get_onload().get("e_waybill_info", {}).get("created_on")
-            reason = gst_settings.reason_for_e_waybill_cancellation
-
-        if not generated_on or (add_days(generated_on, 1) < get_datetime()):
-            return
-
-        values = frappe._dict(
-            {
-                "irn": doc.irn or "",
-                "reason": reason,
-                "ewaybill": doc.ewaybill or "",
-                "remark": "",
-            }
-        )
-        cancel_func(doc, values)
-
-    if doc.irn and gst_settings.enable_e_invoice and gst_settings.auto_cancel_e_invoice:
-        auto_cancel(_cancel_e_invoice, "e_invoice")
+    if auto_cancel_e_invoice(doc, gst_settings=gst_settings):
         return
 
-    if (
-        doc.ewaybill
-        and gst_settings.enable_e_waybill
-        and gst_settings.auto_cancel_e_waybill
-    ):
-        auto_cancel(_cancel_e_waybill, "e_waybill")
+    auto_cancel_e_waybill(doc, gst_settings=gst_settings)
 
 
 def is_e_waybill_applicable(doc, gst_settings=None):
     if not gst_settings:
         gst_settings = frappe.get_cached_doc("GST Settings")
 
-    return bool(
-        gst_settings.enable_e_waybill
-        and doc.company_gstin != doc.billing_address_gstin
-        and not doc.ewaybill
-        and abs(doc.base_grand_total) >= gst_settings.e_waybill_threshold
-        and are_goods_supplied(doc)
-    )
+    if (
+        not gst_settings.enable_e_waybill
+        or doc.company_gstin == doc.billing_address_gstin
+        or doc.ewaybill
+        or not are_goods_supplied(doc)
+    ):
+        return False
+
+    threshold = _get_e_waybill_threshold(doc, gst_settings)
+
+    if threshold is None:
+        return False
+
+    return abs(doc.base_grand_total) >= threshold
 
 
 def on_update_after_submit(doc, method=None):
@@ -371,20 +341,15 @@ def set_and_validate_advances_with_gst(doc):
         if not advance.allocated_amount:
             continue
 
-        tax_row = taxes.get(
-            advance.reference_name, frappe._dict(paid_amount=1, tax_amount=0)
-        )
+        tax_row = taxes.get(advance.reference_name, frappe._dict(paid_amount=1, tax_amount=0))
 
-        _tax_amount = flt(
-            advance.allocated_amount / tax_row.paid_amount * tax_row.tax_amount, 2
-        )
+        _tax_amount = flt(advance.allocated_amount / tax_row.paid_amount * tax_row.tax_amount, 2)
         tax_amount += _tax_amount
         allocated_amount_with_taxes += _tax_amount
         allocated_amount_with_taxes += advance.allocated_amount
 
     excess_allocation = flt(
-        flt(allocated_amount_with_taxes, 2)
-        - (doc.base_rounded_total or doc.base_grand_total),
+        flt(allocated_amount_with_taxes, 2) - (doc.base_rounded_total or doc.base_grand_total),
         2,
     )
     if excess_allocation > 0:
@@ -394,7 +359,9 @@ def set_and_validate_advances_with_gst(doc):
         ).format(bold(fmt_money(excess_allocation, currency=doc.currency)))
 
         if excess_allocation < 1:
-            message += "<br><br>Is it becasue of Rounding Adjustment? Try disabling Rounded Total in the document."
+            message += (
+                "<br><br>Is it becasue of Rounding Adjustment? Try disabling Rounded Total in the document."
+            )
 
         frappe.throw(message, title=_("Invalid Allocated Amount"))
 

@@ -116,7 +116,7 @@ CUSTOM_FIELDS = {
             "label": "Company GSTIN",
             "fieldtype": "Data",
             "insert_after": "billing_address_display",
-            "fetch_from": "company.gstin",
+            "fetch_from": "billing_address.gstin",
             "print_hide": 1,
             "read_only": 1,
             "translatable": 0,
@@ -417,16 +417,9 @@ CUSTOM_FIELDS = {
             "fieldtype": "Check",
         },
         {
-            "label": "Company Logo",
-            "fieldname": "logo_for_printing",
-            "insert_after": "show_physical_signature",
-            "fieldtype": "Attach",
-            "translatable": 0,
-        },
-        {
             "label": "Bank Details",
             "fieldname": "bank_details_for_printing",
-            "insert_after": "logo_for_printing",
+            "insert_after": "show_physical_signature",
             "fieldtype": "Table",
             "options": "Company Print Options",
         },
@@ -632,6 +625,22 @@ CUSTOM_FIELDS = {
     ],
     # Sales Shipping Fields
     ("Delivery Note", "Sales Invoice"): [
+        {
+            "fieldname": "port_address",
+            "label": "Origin Port / Border Checkpost Address Name",
+            "fieldtype": "Link",
+            "options": "Address",
+            "print_hide": 1,
+            "description": (
+                "Address of the place / port in India from where goods are being"
+                " exported <br>(for generating e-Waybill against export of goods)"
+            ),
+            "insert_after": "shipping_address",
+            "depends_on": (
+                "eval:doc.company_gstin && doc.gst_category === 'Overseas' &&"
+                " doc.place_of_supply == '96-Other Countries' && gst_settings.enable_e_waybill"
+            ),
+        },
         {
             "fieldname": "port_code",
             "label": "Port Code",
@@ -938,22 +947,6 @@ CUSTOM_FIELDS = {
     ],
     "Sales Invoice": [
         {
-            "fieldname": "port_address",
-            "label": "Origin Port / Border Checkpost Address Name",
-            "fieldtype": "Link",
-            "options": "Address",
-            "print_hide": 1,
-            "description": (
-                "Address of the place / port in India from where goods are being"
-                " exported <br>(for generating e-Waybill against export of goods)"
-            ),
-            "insert_after": "shipping_address",
-            "depends_on": (
-                "eval:doc.company_gstin && doc.gst_category === 'Overseas' &&"
-                " doc.place_of_supply == '96-Other Countries' && gst_settings.enable_e_waybill"
-            ),
-        },
-        {
             "fieldname": "invoice_copy",
             "label": "Invoice Copy",
             "length": 30,
@@ -1010,9 +1003,7 @@ CUSTOM_FIELDS = {
             "label": "Reason for Ineligibility",
             "fieldtype": "Select",
             "insert_after": "itc_classification",
-            "options": (
-                "\nIneligible As Per Section 17(5)\nITC restricted due to PoS rules"
-            ),
+            "options": ("\nIneligible As Per Section 17(5)\nITC restricted due to PoS rules"),
             "read_only": 1,
             "print_hide": 1,
         },
@@ -1022,11 +1013,30 @@ CUSTOM_FIELDS = {
             "fieldtype": "Select",
             "insert_after": "ineligibility_reason",
             "print_hide": 1,
-            "options": (
-                "\nNot Applicable\nReconciled\nUnreconciled\nIgnored\nMatch Found"
-            ),
+            "options": ("\nNot Applicable\nReconciled\nUnreconciled\nIgnored\nMatch Found"),
             "no_copy": 1,
             "read_only": 1,
+        },
+        {
+            "fieldname": "itc_claim_period",
+            "label": "ITC Claim Period",
+            "fieldtype": "Autocomplete",
+            "insert_after": "reconciliation_status",
+            "print_hide": 1,
+            "no_copy": 1,
+            "translatable": 0,
+            "description": "GSTR-3B period for claiming ITC (MMYYYY) or 'Deferred' to postpone.",
+            "allow_on_submit": 1,
+        },
+        {
+            "fieldname": "is_boe_applicable",
+            "label": "Is BOE Applicable",
+            "fieldtype": "Check",
+            "insert_after": "is_reverse_charge",
+            "print_hide": 1,
+            "default": 0,
+            "read_only": 1,
+            "depends_on": 'eval:doc.itc_classification === "Import Of Goods"',
         },
     ],
     "Purchase Invoice Item": [
@@ -1035,6 +1045,7 @@ CUSTOM_FIELDS = {
             "label": "Pending BOE Qty",
             "fieldtype": "Float",
             "insert_after": "rejected_qty",
+            "read_only": 1,
         },
     ],
     "Purchase Receipt": [
@@ -1322,17 +1333,58 @@ HRMS_CUSTOM_FIELDS = {
     ],
 }
 
-EDUCATION_CUSTOM_FIELDS = {
-    "Fee Category": [
+HSN_CODE_FIELD = {
+    "fieldname": "gst_hsn_code",
+    "label": "HSN/SAC",
+    "fieldtype": "Link",
+    "options": "GST HSN Code",
+    "description": "You can search code by the description of the category.",
+}
+
+EDUCATION_CUSTOM_FIELDS = {"Fee Category": [{**HSN_CODE_FIELD, "insert_after": "description"}]}
+
+HEALTHCARE_CUSTOM_FIELDS = {
+    "Clinical Procedure Template": [
         {
-            "fieldname": "gst_hsn_code",
-            "label": "HSN/SAC",
-            "fieldtype": "Link",
-            "options": "GST HSN Code",
-            "insert_after": "description",
-            "description": "You can search code by the description of the category.",
+            **HSN_CODE_FIELD,
+            "insert_after": "item_group",
+            "reqd": 1,
+            "read_only_depends_on": "eval:doc.link_existing_item",
         }
-    ]
+    ],
+    "Observation Template": [
+        {
+            **HSN_CODE_FIELD,
+            "insert_after": "item_group",
+            "mandatory_depends_on": "eval:doc.is_billable;",
+            "depends_on": "eval:doc.is_billable;",
+            "read_only_depends_on": "eval:doc.link_existing_item",
+        }
+    ],
+    "Therapy Type": [{**HSN_CODE_FIELD, "insert_after": "item_group", "reqd": 1}],
+    "Healthcare Service Unit Type": [
+        {
+            **HSN_CODE_FIELD,
+            "insert_after": "item_group",
+            "mandatory_depends_on": "eval:doc.is_billable;",
+            "depends_on": "eval:doc.is_billable;",
+        }
+    ],
+    "Therapy Plan Template": [
+        {
+            **HSN_CODE_FIELD,
+            "insert_after": "item_group",
+            "reqd": 1,
+            "read_only_depends_on": "eval:doc.link_existing_item",
+        }
+    ],
+    "Medication Linked Item": [
+        {
+            **HSN_CODE_FIELD,
+            "insert_after": "item_group",
+            "in_list_view": 1,
+        }
+    ],
 }
 
 reverse_charge_field = {
@@ -1388,9 +1440,7 @@ E_WAYBILL_DN_FIELDS = [
         "insert_after": "vehicle_no",
         "print_hide": 1,
         "no_copy": 1,
-        "description": (
-            "Set as zero to update distance as per the e-Waybill portal (if available)"
-        ),
+        "description": ("Set as zero to update distance as per the e-Waybill portal (if available)"),
     },
     {
         "fieldname": "gst_transporter_id",
@@ -1660,9 +1710,7 @@ E_WAYBILL_SCR_FIELDS = [
         "insert_after": "vehicle_no",
         "print_hide": 1,
         "no_copy": 1,
-        "description": (
-            "Set as zero to update distance as per the e-Waybill portal (if available)"
-        ),
+        "description": ("Set as zero to update distance as per the e-Waybill portal (if available)"),
     },
     {
         "fieldname": "mode_of_transport",
@@ -1707,7 +1755,7 @@ e_waybill_status_field = {
     "label": "e-Waybill Status",
     "fieldtype": "Select",
     "insert_after": "ewaybill",
-    "options": "\nPending\nGenerated\nAuto-Retry\nCancelled\nNot Applicable\nManually Generated\nManually Cancelled",
+    "options": "\nPending\nGenerated\nManually Generated\nAuto-Retry\nCancelled\nManually Cancelled\nFailed\nNot Applicable",
     "print_hide": 1,
     "no_copy": 1,
     "translatable": 1,
@@ -1722,11 +1770,10 @@ stock_entry_e_waybill_field = {**e_waybill_no_field, "insert_after": "asset_repa
 
 
 E_WAYBILL_FIELDS = {
-    "Sales Invoice": E_WAYBILL_INV_FIELDS
-    + [e_waybill_no_field, e_waybill_status_field],
-    "Delivery Note": E_WAYBILL_DN_FIELDS + [e_waybill_no_field],
-    "Purchase Invoice": E_WAYBILL_INV_FIELDS + [purchase_e_waybill_field],
-    "Purchase Receipt": E_WAYBILL_PURCHASE_RECEIPT_FIELDS + [purchase_e_waybill_field],
-    "Stock Entry": E_WAYBILL_SE_FIELDS + [stock_entry_e_waybill_field],
-    "Subcontracting Receipt": E_WAYBILL_SCR_FIELDS + [purchase_e_waybill_field],
+    "Sales Invoice": [*E_WAYBILL_INV_FIELDS, e_waybill_no_field, e_waybill_status_field],
+    "Delivery Note": [*E_WAYBILL_DN_FIELDS, e_waybill_no_field],
+    "Purchase Invoice": [*E_WAYBILL_INV_FIELDS, purchase_e_waybill_field],
+    "Purchase Receipt": [*E_WAYBILL_PURCHASE_RECEIPT_FIELDS, purchase_e_waybill_field],
+    "Stock Entry": [*E_WAYBILL_SE_FIELDS, stock_entry_e_waybill_field],
+    "Subcontracting Receipt": [*E_WAYBILL_SCR_FIELDS, purchase_e_waybill_field],
 }

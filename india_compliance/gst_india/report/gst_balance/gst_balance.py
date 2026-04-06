@@ -2,6 +2,10 @@
 # For license information, please see license.txt
 
 import frappe
+from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
+    get_accounting_dimensions,
+    get_dimension_with_children,
+)
 from frappe import _
 from frappe.query_builder.functions import Sum
 from frappe.utils import cstr
@@ -38,7 +42,7 @@ def execute(filters=None):
 
 
 @frappe.whitelist()
-def get_pending_voucher_types(company=None):
+def get_pending_voucher_types(company: str | None = None):
     frappe.has_permission("GST Settings", "read", throw=True)
 
     company_accounts = ""
@@ -58,11 +62,23 @@ class GSTBalanceReport:
     def __init__(self, filters=None):
         self.filters = frappe._dict(filters or {})
         self.validate_filters()
-        self.gst_accounts = get_all_gst_accounts(filters.company)
+        self.gst_accounts = get_all_gst_accounts(self.filters.company)
         self.gl_entry = frappe.qb.DocType("GL Entry")
-        self.default_finance_book = frappe.get_cached_value(
-            "Company", self.filters.company, "default_finance_book"
+        self.accounting_dimensions = get_accounting_dimensions(as_list=False) or []
+        self.accounting_dimensions.extend(
+            [
+                {
+                    "fieldname": "cost_center",
+                    "document_type": "Cost Center",
+                },
+                {
+                    "fieldname": "project",
+                    "document_type": "Project",
+                },
+            ]
         )
+
+        self.update_child_filters()
 
     def validate_filters(self):
         if not self.filters.company:
@@ -77,10 +93,18 @@ class GSTBalanceReport:
         if self.filters.from_date and self.filters.from_date > self.filters.to_date:
             frappe.throw(_("From Date cannot be greater than To Date"))
 
+    def update_child_filters(self):
+        for dimension in self.accounting_dimensions:
+            dimension = frappe._dict(dimension)
+            if self.filters.get(dimension.fieldname):
+                if frappe.get_cached_value("DocType", dimension.document_type, "is_tree"):
+                    self.filters[dimension.fieldname] = get_dimension_with_children(
+                        dimension.document_type,
+                        self.filters.get(dimension.fieldname),
+                    )
+
     def get_columns(self):
-        company_currency = frappe.get_cached_value(
-            "Company", self.filters.get("company"), "default_currency"
-        )
+        company_currency = frappe.get_cached_value("Company", self.filters.get("company"), "default_currency")
 
         if not self.filters.show_summary:
             return [
@@ -188,9 +212,9 @@ class GSTBalanceReport:
                 }
             )
 
-            closing_balance = (
-                data[account]["opening_debit"] + data[account]["debit"]
-            ) - (data[account]["opening_credit"] + data[account]["credit"])
+            closing_balance = (data[account]["opening_debit"] + data[account]["debit"]) - (
+                data[account]["opening_credit"] + data[account]["credit"]
+            )
 
             if closing_balance > 0:
                 data[account]["closing_debit"] = closing_balance
@@ -209,9 +233,7 @@ class GSTBalanceReport:
                 data.setdefault(account, frappe._dict(account=account))
                 row = balance.get(account, {})
 
-                data[account][f"gstin_{company_gstin}"] = row.get("debit", 0) - row.get(
-                    "credit", 0
-                )
+                data[account][f"gstin_{company_gstin}"] = row.get("debit", 0) - row.get("credit", 0)
 
         return list(data.values())
 
@@ -242,9 +264,7 @@ class GSTBalanceReport:
 
     def get_closing_balance(self):
         return self.get_account_wise_dict(
-            self.get_gl_query()
-            .where((self.gl_entry.posting_date <= self.filters.to_date))
-            .run(as_dict=True)
+            self.get_gl_query().where(self.gl_entry.posting_date <= self.filters.to_date).run(as_dict=True)
         )
 
     def get_gl_query(self):
@@ -258,17 +278,29 @@ class GSTBalanceReport:
             .where(self.gl_entry.is_cancelled == 0)
             .where(self.gl_entry.company == self.filters.company)
             .where(self.gl_entry.account.isin(self.gst_accounts))
-            .where(
-                (self.gl_entry.finance_book.isin(["", cstr(self.default_finance_book)]))
-                | (self.gl_entry.finance_book.isnull())
-            )
             .groupby(self.gl_entry.account)
         )
 
+        query = self.prepare_conditions(query)
+
+        return query
+
+    def prepare_conditions(self, query):
+
         if self.filters.company_gstin:
-            query = query.where(
-                self.gl_entry.company_gstin == self.filters.company_gstin
-            )
+            query = query.where(self.gl_entry.company_gstin == self.filters.company_gstin)
+
+        query = query.where(
+            (self.gl_entry.finance_book.isin([cstr(self.filters.finance_book), ""]))
+            | (self.gl_entry.finance_book.isnull())
+        )
+
+        for dimension in self.accounting_dimensions:
+            dimension = frappe._dict(dimension)
+            if self.filters.get(dimension.fieldname):
+                query = query.where(
+                    (self.gl_entry[dimension.fieldname]).isin(self.filters.get(dimension.fieldname))
+                )
 
         return query
 

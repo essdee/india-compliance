@@ -1,4 +1,3 @@
-from frappe.tests.utils import FrappeTestCase
 from erpnext.accounts.doctype.payment_reconciliation.test_payment_reconciliation import (
     create_fiscal_year,
 )
@@ -9,6 +8,7 @@ from erpnext.subcontracting.doctype.subcontracting_order.subcontracting_order im
 from erpnext.subcontracting.doctype.subcontracting_order.test_subcontracting_order import (
     create_subcontracting_order,
 )
+from frappe.tests.utils import FrappeTestCase
 
 from india_compliance.gst_india.overrides.test_subcontracting_transaction import (
     create_purchase_order,
@@ -55,7 +55,7 @@ response = {
                         "uqc": "NOS",
                         "qty": 10.0,
                         "desc": "Subcontracted SRM Item 1",
-                        "txval": 0.0,
+                        "txval": 200.0,
                         "goods_ty": "8b",
                         "tx_i": 0.0,
                         "tx_c": 0.0,
@@ -70,6 +70,7 @@ response = {
         ],
     },
     "filename": "ITC-04-Gov-24AAQCA8719H1ZC-182024.json",
+    "has_invalid_data": False,
 }
 
 
@@ -77,9 +78,7 @@ class TestITC04Export(FrappeTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        create_fiscal_year(
-            "_Test Indian Registered Company", "2024-04-01", "2025-03-31"
-        )
+        create_fiscal_year("_Test Indian Registered Company", "2024-04-01", "2025-03-31")
         create_subcontracting_data()
 
         po = create_purchase_order(
@@ -95,9 +94,7 @@ class TestITC04Export(FrappeTestCase):
         sco = create_subcontracting_order(po_name=po.name)
 
         rm_items = get_rm_items(sco.supplied_items)
-        cls.se = make_stock_transfer_entry(
-            sco_no=sco.name, rm_items=rm_items, do_not_submit=1
-        )
+        cls.se = make_stock_transfer_entry(sco_no=sco.name, rm_items=rm_items, do_not_submit=1)
         cls.se.posting_date = "2025-01-10"
         cls.se.set_posting_time = 1
         cls.se.save()

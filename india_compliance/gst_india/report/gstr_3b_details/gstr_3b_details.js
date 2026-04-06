@@ -56,6 +56,14 @@ frappe.query_reports["GSTR-3B Details"] = {
             ],
         },
         {
+            fieldname: "filter_by",
+            label: __("Filter By"),
+            fieldtype: "Select",
+            default: "ITC Claim Period",
+            options: ["ITC Claim Period", "Posting Date"],
+            reqd: 1,
+        },
+        {
             fieldname: "section",
             label: __("Section"),
             fieldtype: "Select",
@@ -65,9 +73,7 @@ frappe.query_reports["GSTR-3B Details"] = {
                 { value: "4", label: __("4. Eligible ITC") },
                 {
                     value: "5",
-                    label: __(
-                        "5. Values of exempt, nil rated and non-GST inward supplies"
-                    ),
+                    label: __("5. Values of exempt, nil rated and non-GST inward supplies"),
                 },
             ],
         },

@@ -18,7 +18,7 @@ from india_compliance.gst_india.utils.itc_04.itc_04_json_map import (
 
 
 @frappe.whitelist()
-def download_itc_04_json(filters):
+def download_itc_04_json(filters: str | dict | frappe._dict):
     frappe.has_permission("GST Job Work Stock Movement", "export", throw=True)
 
     filters = frappe.parse_json(filters)
@@ -26,17 +26,21 @@ def download_itc_04_json(filters):
     ret_period = get_return_period(filters)
 
     data = get_data(filters)
+    has_invalid_data = data.pop("has_invalid_data", False)
 
     GenerateGSTR1().normalize_data(data)
 
-    return {
+    response = {
         "data": {
             "gstin": company_gstin,
             "fp": ret_period,
             **convert_to_gov_data_format(data, company_gstin),
         },
         "filename": f"ITC-04-Gov-{company_gstin}-{ret_period}.json",
+        "has_invalid_data": has_invalid_data,
     }
+
+    return response
 
 
 def get_return_period(filters):
@@ -69,27 +73,30 @@ def get_return_period(filters):
             return f"{period}{start_year}"
 
     frappe.throw(
-        _(
-            "Date range does not belong to any <b>Quarterly</b>,  <b>Half Yearly</b> or <b>Annual</b> Returns."
-        )
+        _("Date range does not belong to any <b>Quarterly</b>,  <b>Half Yearly</b> or <b>Annual</b> Returns.")
     )
 
 
 def get_data(filters):
     itc04 = ITC04Query(filters)
 
-    table_4_data = itc04.get_query_table_4_se().run(
+    table_4_data = itc04.get_query_table_4_se().run(as_dict=True) + itc04.get_query_table_4_sr().run(
         as_dict=True
-    ) + itc04.get_query_table_4_sr().run(as_dict=True)
+    )
 
-    table_5a_data = itc04.get_query_table_5A_se().run(
+    table_5a_data = itc04.get_query_table_5A_se().run(as_dict=True) + itc04.get_query_table_5A_sr().run(
         as_dict=True
-    ) + itc04.get_query_table_5A_sr().run(as_dict=True)
+    )
 
-    return {
-        ITC04JsonKey.FG_RECEIVED.value: process_table_5a_data(table_5a_data),
+    fg_received_data = process_table_5a_data(table_5a_data)
+
+    data = {
+        ITC04JsonKey.FG_RECEIVED.value: fg_received_data,
         ITC04JsonKey.RM_SENT.value: process_table_4_data(table_4_data),
+        "has_invalid_data": any(not invoice.original_challan_no for invoice in table_5a_data),
     }
+
+    return data
 
 
 def process_table_4_data(invoice_data):
@@ -103,9 +110,7 @@ def process_table_4_data(invoice_data):
             ITC04_ItemField.UOM.value: f"{uom}-{UOM_MAP[uom]}",
             ITC04_ItemField.QUANTITY.value: abs(invoice.qty),
             ITC04_ItemField.DESCRIPTION.value: invoice.description,
-            ITC04_ItemField.GOODS_TYPE.value: (
-                "8b" if invoice.item_type == "Inputs" else "7b"
-            ),
+            ITC04_ItemField.GOODS_TYPE.value: ("8b" if invoice.item_type == "Inputs" else "7b"),
         }
 
     res = {}
@@ -143,13 +148,14 @@ def process_table_5a_data(invoice_data):
     res = {}
 
     for invoice in invoice_data:
+        if not invoice.original_challan_no:
+            continue
+
         key = f"{invoice.original_challan_no} - {invoice.invoice_no}"
         uom = invoice.uom.upper()
 
         jw_challan_date = format_date(get_date_str(invoice.posting_date), "dd-mm-yyyy")
-        challan_date = format_date(
-            get_date_str(invoice.original_challan_date), "dd-mm-yyyy"
-        )
+        challan_date = format_date(get_date_str(invoice.original_challan_date), "dd-mm-yyyy")
 
         if key not in res:
             res[key] = {
@@ -158,9 +164,7 @@ def process_table_5a_data(invoice_data):
                 ITC04_DataField.JOB_WORKER_GSTIN.value: invoice.supplier_gstin,
                 ITC04_DataField.JOB_WORKER_STATE_CODE.value: invoice.place_of_supply,
                 ITC04_DataField.FLAG.value: "N",
-                ITC04_DataField.ITEMS.value: [
-                    create_item(invoice, uom, jw_challan_date, challan_date)
-                ],
+                ITC04_DataField.ITEMS.value: [create_item(invoice, uom, jw_challan_date, challan_date)],
             }
         else:
             res[key][ITC04_DataField.ITEMS.value].append(

@@ -1,12 +1,12 @@
 import json
 from base64 import b64decode, b64encode
 from functools import wraps
-
-from cryptography import x509
-from cryptography.hazmat.backends import default_backend
+from typing import ClassVar
 
 import frappe
 import frappe.utils
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 from frappe import _
 from frappe.utils import add_to_date, cint, now_datetime
 
@@ -15,7 +15,7 @@ from india_compliance.exceptions import (
     InvalidOTPError,
     OTPRequestedError,
 )
-from india_compliance.gst_india.api_classes.base import BaseAPI
+from india_compliance.gst_india.api_classes.base import BaseAPI, change_base_path
 from india_compliance.gst_india.utils import merge_dicts, tar_gz_bytes_to_data
 from india_compliance.gst_india.utils.cryptography import (
     aes_decrypt_data,
@@ -69,7 +69,7 @@ class StaticResourcesAPI(BaseAPI):
 
 
 class FilesAPI(BaseAPI):
-    BASE_PATH = "standard/gstn/files"
+    BASE_PATH = "standard/gstn_/files"
 
     def get_all(self, url_details):
         response = frappe._dict()
@@ -91,9 +91,7 @@ class FilesAPI(BaseAPI):
         computed_hash = hash_sha256(response)
         if computed_hash != self.hash:
             frappe.throw(
-                _(
-                    "Hash of file doesn't match for {0}. File may be corrupted or tampered."
-                ).format(self.ul)
+                _("Hash of file doesn't match for {0}. File may be corrupted or tampered.").format(self.ul)
             )
 
         encrypted_data = tar_gz_bytes_to_data(response)
@@ -108,7 +106,10 @@ class FilesAPI(BaseAPI):
 
 
 class TaxpayerAuthenticate(BaseAPI):
-    SENSITIVE_INFO = BaseAPI.SENSITIVE_INFO + (
+    API_NAME = "GST Returns"
+
+    SENSITIVE_INFO: ClassVar[tuple] = (
+        *BaseAPI.SENSITIVE_INFO,
         "auth-token",
         "auth_token",
         "app_key",
@@ -116,7 +117,7 @@ class TaxpayerAuthenticate(BaseAPI):
         "rek",
     )
 
-    IGNORED_ERROR_CODES = {
+    IGNORED_ERROR_CODES: ClassVar[dict] = {
         "RETOTPREQUEST": "otp_requested",
         "EVCREQUEST": "otp_requested",
         "AUTH158": "authorization_failed",  # GSTR1
@@ -154,7 +155,8 @@ class TaxpayerAuthenticate(BaseAPI):
                 frappe.local.job.after_job.add(self.reset_auth_token)
                 raise InvalidAuthTokenError
 
-            # reset auth token
+            session_ip = self.get_public_ip()
+
             frappe.db.set_value(
                 "GST Credential",
                 {
@@ -162,10 +164,15 @@ class TaxpayerAuthenticate(BaseAPI):
                     "username": self.username,
                     "service": "Returns",
                 },
-                {"auth_token": None},
+                {"auth_token": None, "session_ip": session_ip},
             )
+            frappe.clear_document_cache("GST Settings")
 
             self.auth_token = None
+            self.session_ip = session_ip
+
+            self.default_headers["ip-usr"] = self.session_ip
+
             return self.request_otp()
 
         response = super().post(
@@ -217,9 +224,7 @@ class TaxpayerAuthenticate(BaseAPI):
             values["auth_token"] = response.auth_token
 
         if response.get("expiry"):
-            session_expiry = add_to_date(
-                None, minutes=cint(response.expiry), as_datetime=True
-            )
+            session_expiry = add_to_date(None, minutes=cint(response.expiry), as_datetime=True)
             self.session_expiry = session_expiry
             values["session_expiry"] = session_expiry
 
@@ -252,9 +257,7 @@ class TaxpayerAuthenticate(BaseAPI):
             json["app_key"] = (
                 aes_encrypt_data(self.app_key, self.session_key)
                 if json.get("action") == "REFRESHTOKEN"
-                else encrypt_using_public_key(
-                    self.app_key, self.get_public_certificate()
-                )
+                else encrypt_using_public_key(self.app_key, self.get_public_certificate())
             )
 
         if json.get("otp"):
@@ -297,19 +300,34 @@ class TaxpayerAuthenticate(BaseAPI):
                 "username": self.username,
                 "service": "Returns",
             },
-            {"auth_token": None},
+            {"auth_token": None, "session_ip": None},
         )
 
         if not frappe.flags.in_test:
             frappe.db.commit()  # nosemgrep - executed in after enqueue
 
+    @change_base_path("")
+    def get_public_ip(self):
+        """
+        Fetch current public IP address from ASP endpoint
+        """
+        response = super().get(endpoint="get-public-ip")
+
+        session_ip = response.get("ip")
+
+        if not session_ip:
+            frappe.throw(_("Could not fetch Public IP address."))
+
+        return session_ip
+
 
 class TaxpayerBaseAPI(TaxpayerAuthenticate):
-    BASE_PATH = "standard/gstn"
+    BASE_PATH = "standard/gstn_"
 
-    IGNORED_ERROR_CODES = {
+    IGNORED_ERROR_CODES: ClassVar[dict] = {
         **TaxpayerAuthenticate.IGNORED_ERROR_CODES,
         "RT-R1R3BAV-1007": "authorization_failed",  # Either auth-token or username is invalid. Raised in get_filing_preference
+        # "RT-R1R3BAV-1013": "authorization_failed",  # "Invalid ip-usr." Change in request IP
     }
 
     def setup(self, company_gstin):
@@ -318,12 +336,14 @@ class TaxpayerBaseAPI(TaxpayerAuthenticate):
 
         self.company_gstin = company_gstin
         self.fetch_credentials(self.company_gstin, "Returns", require_password=False)
+
         self.default_headers.update(
             {
                 "gstin": self.company_gstin,
                 "state-cd": self.company_gstin[:2],
                 "username": self.username,
                 "txn": self.generate_request_id(length=32),
+                "ip-usr": self.session_ip,
             }
         )
 
@@ -437,9 +457,7 @@ class TaxpayerBaseAPI(TaxpayerAuthenticate):
         # Handle invalid public key
         if response.error_type == "invalid_public_key":
             StaticResourcesAPI().get_gstn_public_certificate(
-                error_message=_(
-                    "Looks like Public Key of GSTN used for encryption is Invalid"
-                )
+                error_message=_("Looks like Public Key of GSTN used for encryption is Invalid")
             )
 
     def is_ignored_error(self, response):
@@ -494,9 +512,7 @@ class TaxpayerBaseAPI(TaxpayerAuthenticate):
         return
 
     def fetch_filing_preference(self, fy):
-        return self.get(
-            action="GETPREF", params={"fy": fy}, endpoint="returns"
-        ).response
+        return self.get(action="GETPREF", params={"fy": fy}, endpoint="returns").response
 
     @staticmethod
     def get_fy():

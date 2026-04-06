@@ -4,7 +4,7 @@
 import frappe
 from frappe import _
 from frappe.query_builder import Case, Order
-from frappe.query_builder.functions import IfNull, IsNull, LiteralValue
+from frappe.query_builder.functions import IfNull, LiteralValue
 
 
 def execute(filters: dict | None = None):
@@ -22,14 +22,9 @@ def execute(filters: dict | None = None):
 
 
 class GSTINDetailedReport:
-
     def __init__(self, filters: dict | None = None):
         self.filters = frappe._dict(filters or {})
-        self.doctypes = (
-            [self.filters.party_type]
-            if self.filters.party_type
-            else ["Customer", "Supplier"]
-        )
+        self.doctypes = [self.filters.party_type] if self.filters.party_type else ["Customer", "Supplier"]
         self.is_naming_series = "Naming Series" in (
             frappe.db.get_single_value("Buying Settings", "supp_master_name"),
             frappe.db.get_single_value("Selling Settings", "cust_master_name"),
@@ -124,11 +119,7 @@ class GSTINDetailedReport:
             gstin.registration_date,
             gstin.last_updated_on,
             gstin.cancelled_date,
-            Case()
-            .when(IsNull(gstin.is_blocked), "")
-            .when(gstin.is_blocked == 0, "No")
-            .else_("Yes")
-            .as_("is_blocked"),
+            Case().when(gstin.is_blocked == 0, "No").else_("Yes").as_("is_blocked"),
             party_query.party_type,
             party_query.party,
         ]
@@ -160,9 +151,7 @@ class GSTINDetailedReport:
         ]
 
         party_query = (
-            frappe.qb.from_(address)
-            .inner_join(dynamic_link)
-            .on(address.name == dynamic_link.parent)
+            frappe.qb.from_(address).inner_join(dynamic_link).on(address.name == dynamic_link.parent)
         )
 
         if self.is_naming_series:
@@ -206,8 +195,6 @@ class GSTINDetailedReport:
         if self.is_naming_series:
             select_fields.append(dt[f"{doctype.lower()}_name"].as_("party_name"))
 
-        query = (
-            frappe.qb.from_(dt).select(*select_fields).where(IfNull(dt.gstin, "") != "")
-        )
+        query = frappe.qb.from_(dt).select(*select_fields).where(IfNull(dt.gstin, "") != "")
 
         return query

@@ -70,7 +70,27 @@ Object.assign(india_compliance, {
         return `${month}${year}`;
     },
 
-    get_gstin_query(party, party_type = "Company") {
+    check_duplicate_gstin(gstin, party_type, party = null) {
+        if (!gstin || gstin.length !== 15) return;
+        this.check_duplicate_party("gstin", gstin, party_type, party);
+    },
+
+    check_duplicate_pan(pan, party_type, party = null) {
+        if (!pan || pan.length !== 10) return;
+        this.check_duplicate_party("pan", pan, party_type, party);
+    },
+
+    check_duplicate_party(field, value, party_type, party = null) {
+        if (!party_type) return;
+        if (!frappe.boot.gst_party_types.includes(party_type)) return;
+
+        frappe.call({
+            method: "india_compliance.gst_india.utils.check_duplicate_party",
+            args: { field, value, party_type, party },
+        });
+    },
+
+    get_gstin_query(party, party_type = "Company", exclude_isd = false) {
         if (!party) {
             frappe.show_alert({
                 message: __("Please select {0} to get GSTIN options", [__(party_type)]),
@@ -81,7 +101,7 @@ Object.assign(india_compliance, {
 
         return {
             query: "india_compliance.gst_india.utils.get_gstin_list",
-            params: { party, party_type },
+            params: { party, party_type, exclude_isd },
         };
     },
 
@@ -107,10 +127,10 @@ Object.assign(india_compliance, {
     },
 
     get_party_type(doctype) {
-        return in_list(frappe.boot.sales_doctypes, doctype) ? "Customer" : "Supplier";
+        return frappe.boot.sales_doctypes.includes(doctype) ? "Customer" : "Supplier";
     },
 
-    async set_gstin_status(field, doc, force_update) {
+    async set_gstin_status(field, doc, force_update = false) {
         const gstin = field.value;
         if (!gstin || gstin.length !== 15) return field.set_description("");
 
@@ -124,10 +144,7 @@ Object.assign(india_compliance, {
         if (!message) message = { status: "Not Available" };
 
         field.set_description(
-            india_compliance.get_gstin_status_desc(
-                message?.status,
-                message?.last_updated_on
-            )
+            india_compliance.get_gstin_status_desc(message?.status, message?.last_updated_on),
         );
 
         this.set_gstin_refresh_btn(field, doc);
@@ -135,7 +152,7 @@ Object.assign(india_compliance, {
         return message;
     },
 
-    async set_pan_status(field, force_update = null) {
+    async set_pan_status(field, force_update = false) {
         const pan = field.value;
         field.set_description("");
         if (!pan || pan.length !== 10) return;
@@ -167,7 +184,7 @@ Object.assign(india_compliance, {
                         <use href="#icon-refresh"></use>
                     </svg>
                 </span>
-            </div>`
+            </div>`,
         );
 
         pan_desc.find(".refresh-pan").on("click", async function () {
@@ -268,8 +285,16 @@ Object.assign(india_compliance, {
     },
 
     validate_gstin(gstin, show_msg = true) {
+        const opts = { title: __("Error"), indicator: "red" };
+
         if (!gstin || gstin.length !== 15) {
-            if (show_msg) frappe.msgprint(__("GSTIN must be 15 characters long"));
+            if (show_msg) {
+                frappe.msgprint({
+                    message: __("GSTIN must be 15 characters long"),
+                    ...opts,
+                });
+            }
+
             return;
         }
 
@@ -277,11 +302,13 @@ Object.assign(india_compliance, {
 
         if (GSTIN_REGEX.test(gstin) && is_gstin_check_digit_valid(gstin)) {
             return gstin;
-        } else {
-            if (show_msg) frappe.msgprint(__("Invalid GSTIN"));
+        } else if (show_msg) {
+            frappe.msgprint({
+                message: __("Invalid GSTIN"),
+                ...opts,
+            });
         }
     },
-
     guess_gst_category(gstin, country) {
         if (!gstin) {
             if (country && country !== "India") return "Overseas";
@@ -307,6 +334,30 @@ Object.assign(india_compliance, {
         };
     },
 
+    setup_itc_claim_period_query(frm) {
+        frm.set_query("itc_claim_period", () => ({
+            query: "india_compliance.gst_india.utils.itc_claim.get_itc_period_options",
+            params: {
+                company_gstin: frm.doc.company_gstin,
+                posting_date: frm.doc.posting_date,
+            },
+        }));
+    },
+
+    set_itc_claim_period_status(frm) {
+        frm.set_df_property("itc_claim_period", "ignore_validation", 1);
+
+        const is_filed = frm.doc.__onload?.is_itc_period_filed;
+        frm.set_df_property("itc_claim_period", "read_only", is_filed ? 1 : 0);
+        frm.set_df_property(
+            "itc_claim_period",
+            "description",
+            is_filed
+                ? __("GSTR-3B for {0} is filed", [frm.doc.itc_claim_period])
+                : __("GSTR-3B period for claiming ITC (MMYYYY) or 'Deferred' to postpone."),
+        );
+    },
+
     set_reconciliation_status(frm, field) {
         if (!frm.doc.docstatus === 1 || !frm.doc.reconciliation_status) return;
 
@@ -322,7 +373,7 @@ Object.assign(india_compliance, {
         frm.get_field(field).set_description(
             `<div class="d-flex indicator ${color}">
                 2A/2B Status:&nbsp;<strong>${frm.doc.reconciliation_status}</strong>
-            </div>`
+            </div>`,
         );
     },
 
@@ -330,14 +381,12 @@ Object.assign(india_compliance, {
         // returns a list of error messages if invoice number is invalid
         let message_list = [];
         if (invoice_number.length > 16) {
-            message_list.push(
-                "Transaction Name must be 16 characters or fewer to meet GST requirements"
-            );
+            message_list.push("Transaction Name must be 16 characters or fewer to meet GST requirements");
         }
 
         if (!GST_INVOICE_NUMBER_FORMAT.test(invoice_number)) {
             message_list.push(
-                "Transaction Name should start with an alphanumeric character and can only contain alphanumeric characters, dash (-) and slash (/) to meet GST requirements."
+                "Transaction Name should start with an alphanumeric character and can only contain alphanumeric characters, dash (-) and slash (/) to meet GST requirements.",
             );
         }
 
@@ -371,7 +420,7 @@ Object.assign(india_compliance, {
     },
 
     set_last_month_as_default_period(report) {
-        report.filters.forEach(filter => {
+        report.filters.forEach((filter) => {
             if (filter.fieldname === "from_date") {
                 filter.default = this.last_month_start();
             }
@@ -401,17 +450,11 @@ Object.assign(india_compliance, {
         const current_year = today.getFullYear();
 
         if (current_month <= 3) {
-            return position === "start"
-                ? `${current_year - 1}-03-01`
-                : `${current_year - 1}-09-30`;
+            return position === "start" ? `${current_year - 1}-03-01` : `${current_year - 1}-09-30`;
         } else if (current_month <= 9) {
-            return position === "start"
-                ? `${current_year - 1}-10-01`
-                : `${current_year}-03-31`;
+            return position === "start" ? `${current_year - 1}-10-01` : `${current_year}-03-31`;
         } else {
-            return position === "start"
-                ? `${current_year}-04-01`
-                : `${current_year}-09-30`;
+            return position === "start" ? `${current_year}-04-01` : `${current_year}-09-30`;
         }
     },
 
@@ -422,7 +465,7 @@ Object.assign(india_compliance, {
         const start_year = 2017;
         const year_range = current_year - start_year + 1;
         const options = Array.from({ length: year_range }, (_, index) =>
-            (start_year + year_range - index - 1).toString()
+            (start_year + year_range - index - 1).toString(),
         );
 
         if (
@@ -436,10 +479,7 @@ Object.assign(india_compliance, {
     },
 
     primary_to_danger_btn(parent) {
-        parent.$wrapper
-            .find(".btn-primary")
-            .removeClass("btn-primary")
-            .addClass("btn-danger");
+        parent.$wrapper.find(".btn-primary").removeClass("btn-primary").addClass("btn-danger");
     },
 
     add_divider_to_btn_group(btn_group_name) {
@@ -497,11 +537,7 @@ Object.assign(india_compliance, {
 
         if (doc.doctype != "Stock Entry") return true;
 
-        if (
-            !["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(
-                doc.purpose
-            )
-        ) {
+        if (!["Material Transfer", "Material Issue", "Send to Subcontractor"].includes(doc.purpose)) {
             return false;
         }
 

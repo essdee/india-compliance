@@ -1,5 +1,4 @@
 import click
-
 import frappe
 
 from india_compliance.audit_trail.setup import setup_fixtures as setup_audit_trail
@@ -7,6 +6,7 @@ from india_compliance.gst_india.constants import BUG_REPORT_URL
 from india_compliance.gst_india.setup import after_install as setup_gst
 from india_compliance.gst_india.setup import (
     create_education_custom_fields,
+    create_healthcare_custom_fields,
     create_hrms_custom_fields,
 )
 from india_compliance.income_tax_india.setup import after_install as setup_income_tax
@@ -47,6 +47,7 @@ POST_INSTALL_PATCHES = (
     "update_reconciliation_status",
     "update_vehicle_no_field_in_purchase_receipt",
     "update_gst_treatment_for_taxable_nil_transaction_item",  # it should be always after improve item tax template
+    "update_gst_treatment_for_import_transactions",
     "migrate_fields_for_gstr3b",
 )
 
@@ -98,9 +99,7 @@ def disable_ic_account_page():
     Disable the India Compliance Account Page if API secret is set in frappe.conf
     """
 
-    if not frappe.conf.ic_api_secret or frappe.db.exists(
-        "Custom Role", {"page": "india-compliance-account"}
-    ):
+    if not frappe.conf.ic_api_secret or frappe.db.exists("Custom Role", {"page": "india-compliance-account"}):
         return
 
     frappe.get_doc(doctype="Custom Role", page="india-compliance-account").insert()
@@ -112,3 +111,6 @@ def after_app_install(app_name):
 
     if app_name == "education":
         create_education_custom_fields()
+
+    if app_name == "healthcare":
+        create_healthcare_custom_fields()

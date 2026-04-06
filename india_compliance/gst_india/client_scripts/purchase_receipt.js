@@ -9,7 +9,7 @@ frappe.ui.form.on(DOCTYPE, {
             },
         });
 
-        frm.set_query("driver", doc => {
+        frm.set_query("driver", (doc) => {
             return {
                 filters: {
                     transporter: doc.transporter,
@@ -23,12 +23,12 @@ frappe.ui.form.on(DOCTYPE, {
             show_sandbox_mode_indicator();
     },
 
-    after_save(frm) {
+    async after_save(frm) {
         if (
             frm.doc.supplier_address ||
             !(frm.doc.gst_category == "Unregistered" || frm.doc.is_return) ||
             !is_e_waybill_applicable(frm) ||
-            !has_e_waybill_threshold_met(frm)
+            !(await has_e_waybill_threshold_met(frm))
         )
             return;
 
@@ -37,7 +37,7 @@ frappe.ui.form.on(DOCTYPE, {
                 message: __("Supplier Address is required to create e-Waybill"),
                 indicator: "yellow",
             },
-            10
+            10,
         );
     },
 });

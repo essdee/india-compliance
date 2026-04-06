@@ -1,15 +1,16 @@
 import frappe
+from erpnext.accounts.general_ledger import make_gl_entries
+from erpnext.accounts.utils import create_payment_ledger_entry
+from erpnext.controllers.accounts_controller import get_advance_payment_entries
 from frappe import _
 from frappe.contacts.doctype.address.address import get_default_address
 from frappe.query_builder.functions import Sum
 from frappe.utils import flt, getdate
-from erpnext.accounts.general_ledger import make_gl_entries
-from erpnext.accounts.utils import create_payment_ledger_entry
-from erpnext.controllers.accounts_controller import get_advance_payment_entries
 
 from india_compliance.gst_india.constants import TAX_TYPES
 from india_compliance.gst_india.overrides.transaction import (
     get_gst_details,
+    set_gst_tax_type,
 )
 from india_compliance.gst_india.overrides.transaction import (
     validate_backdated_transaction as _validate_backdated_transaction,
@@ -21,7 +22,7 @@ from india_compliance.gst_india.utils import get_all_gst_accounts
 
 
 @frappe.whitelist()
-def get_outstanding_reference_documents(args, validate=False):
+def get_outstanding_reference_documents(args: str | dict | frappe._dict, validate: bool = False):
     from erpnext.accounts.doctype.payment_entry.payment_entry import (
         get_outstanding_reference_documents,
     )
@@ -29,16 +30,12 @@ def get_outstanding_reference_documents(args, validate=False):
     reference_documents = get_outstanding_reference_documents(args, validate)
 
     invoice_list = [
-        item["voucher_no"]
-        for item in reference_documents
-        if item["voucher_type"] == "Purchase Invoice"
+        item["voucher_no"] for item in reference_documents if item["voucher_type"] == "Purchase Invoice"
     ]
     if not invoice_list:
         return reference_documents
 
-    reconciliation_status_dict = get_reconciliation_status_for_invoice_list(
-        invoice_list
-    )
+    reconciliation_status_dict = get_reconciliation_status_for_invoice_list(invoice_list)
 
     for d in reference_documents:
         d["reconciliation_status"] = reconciliation_status_dict.get(d["voucher_no"], "")
@@ -53,7 +50,7 @@ def get_reconciliation_status_for_invoice_list(invoice_list):
     invoice_list = frappe.parse_json(invoice_list)
 
     reconciliation_status_dict = dict(
-        frappe.get_all(
+        frappe.get_list(
             "Purchase Invoice",
             filters={"name": ["in", invoice_list]},
             fields=("name", "reconciliation_status"),
@@ -67,15 +64,9 @@ def onload(doc, method=None):
     if not doc.references:
         return
 
-    invoice_list = [
-        x.reference_name
-        for x in doc.references
-        if x.reference_doctype == "Purchase Invoice"
-    ]
+    invoice_list = [x.reference_name for x in doc.references if x.reference_doctype == "Purchase Invoice"]
 
-    reconciliation_status_dict = get_reconciliation_status_for_invoice_list(
-        invoice_list
-    )
+    reconciliation_status_dict = get_reconciliation_status_for_invoice_list(invoice_list)
 
     doc.set_onload("reconciliation_status_dict", reconciliation_status_dict)
 
@@ -90,11 +81,10 @@ def validate(doc, method=None):
         validate_transaction_for_advance_payment(doc, method)
 
     else:
+        set_gst_tax_type(doc)
         for row in doc.taxes:
             if row.gst_tax_type in TAX_TYPES and row.tax_amount != 0:
-                frappe.throw(
-                    _("GST Taxes are not allowed for Supplier Advance Payment Entry")
-                )
+                frappe.throw(_("GST Taxes are not allowed for Supplier Advance Payment Entry"))
 
 
 def on_submit(doc, method=None):
@@ -123,7 +113,7 @@ def validate_backdated_transaction(doc, action="submit"):
 
 
 @frappe.whitelist()
-def update_party_details(party_details, doctype, company):
+def update_party_details(party_details: str | dict | frappe._dict, doctype: str, company: str):
     party_details = frappe.parse_json(party_details)
 
     address = get_default_address("Customer", party_details.get("customer"))
@@ -223,9 +213,7 @@ def _get_gl_for_advance_gst_reversal(payment_entry, reference_row):
 
         # All existing PLE are delinked and new ones are created everytime on update
         # refer: reconcile_against_document in utils.py
-        create_payment_ledger_entry(
-            [gl_entry], update_outstanding="No", cancel=0, adv_adj=1
-        )
+        create_payment_ledger_entry([gl_entry], update_outstanding="No", cancel=0, adv_adj=1)
 
         return gl_dicts
 
@@ -289,23 +277,16 @@ def get_proportionate_taxes_for_reversal(payment_entry, reference_row):
         return
 
     # Ensure there is no rounding error
-    if (
-        not payment_entry.unallocated_amount
-        and payment_entry.references[-1].idx == reference_row.idx
-    ):
+    if not payment_entry.unallocated_amount and payment_entry.references[-1].idx == reference_row.idx:
         return balance_taxes(payment_entry, reference_row, taxes)
 
     return get_proportionate_taxes_for_row(payment_entry, reference_row, taxes)
 
 
 def get_proportionate_taxes_for_row(payment_entry, reference_row, taxes):
-    base_allocated_amount = payment_entry.calculate_base_allocated_amount_for_reference(
-        reference_row
-    )
+    base_allocated_amount = payment_entry.calculate_base_allocated_amount_for_reference(reference_row)
     for account, amount in taxes.items():
-        taxes[account] = flt(
-            amount * base_allocated_amount / payment_entry.base_paid_amount, 2
-        )
+        taxes[account] = flt(amount * base_allocated_amount / payment_entry.base_paid_amount, 2)
 
     return taxes
 
@@ -318,9 +299,7 @@ def balance_taxes(payment_entry, reference_row, taxes):
 
             taxes[account] = taxes[account] - flt(
                 amount
-                * payment_entry.calculate_base_allocated_amount_for_reference(
-                    allocation_row
-                )
+                * payment_entry.calculate_base_allocated_amount_for_reference(allocation_row)
                 / payment_entry.base_paid_amount,
                 2,
             )
@@ -404,9 +383,7 @@ def adjust_allocations_for_taxes_in_payment_reconciliation(doc):
         row.update(
             {
                 "amount": tax_row.unallocated_amount,
-                "allocated_amount": flt(
-                    row.get("allocated_amount", 0) * tax_row.paid_proportion, 2
-                ),
+                "allocated_amount": flt(row.get("allocated_amount", 0) * tax_row.paid_proportion, 2),
                 "unreconciled_amount": tax_row.unallocated_amount,
             }
         )
@@ -418,9 +395,7 @@ def get_taxes_summary(company, payment_entries):
         return {}
 
     references = [
-        advance.reference_name
-        for advance in payment_entries
-        if advance.reference_type == "Payment Entry"
+        advance.reference_name for advance in payment_entries if advance.reference_type == "Payment Entry"
     ]
 
     if not references:
@@ -444,6 +419,10 @@ def get_taxes_summary(company, payment_entries):
         .where(gl_entry.voucher_no.isin(references))
         .where(gl_entry.account.isin(gst_accounts))
         .where(gl_entry.company == company)
+        # This is temporary fix.
+        # It will still cause issues where
+        # other taxes are charged like TDS and GST Account are specified in deduction table.
+        .where(pe.total_taxes_and_charges != 0)
         .groupby(gl_entry.voucher_no)
         .run(as_dict=True)
     )

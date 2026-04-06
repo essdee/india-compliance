@@ -1,10 +1,11 @@
 import json
 
-import jwt
-
 import frappe
+import jwt
 from frappe import _
+from frappe.model.document import Document
 from frappe.utils import (
+    add_days,
     add_to_date,
     cstr,
     flt,
@@ -14,7 +15,11 @@ from frappe.utils import (
     random_string,
 )
 
-from india_compliance.exceptions import GSPServerError
+from india_compliance.exceptions import (
+    AlreadyGeneratedError,
+    GSPServerError,
+    NotApplicableError,
+)
 from india_compliance.gst_india.api_classes.nic.e_invoice import EInvoiceAPI
 from india_compliance.gst_india.api_classes.taxpayer_base import otp_handler
 from india_compliance.gst_india.api_classes.taxpayer_e_invoice import (
@@ -24,7 +29,9 @@ from india_compliance.gst_india.constants import (
     CURRENCY_CODES,
     EXPORT_TYPES,
     GST_CATEGORIES,
+    GSTIN_FORMAT,
     PORT_CODES,
+    SERVICE_HSN_PREFIX,
     TAXABLE_GST_TREATMENTS,
 )
 from india_compliance.gst_india.constants.e_invoice import (
@@ -44,10 +51,12 @@ from india_compliance.gst_india.utils import (
     load_doc,
     parse_datetime,
     send_updated_doc,
+    set_einvoice_status,
     update_onload,
 )
 from india_compliance.gst_india.utils.e_waybill import (
     _cancel_e_waybill,
+    _get_e_waybill_threshold,
     generate_pending_e_waybills,
     log_and_process_e_waybill_generation,
 )
@@ -55,7 +64,7 @@ from india_compliance.gst_india.utils.transaction_data import GSTTransactionData
 
 
 @frappe.whitelist()
-def enqueue_bulk_e_invoice_generation(docnames):
+def enqueue_bulk_e_invoice_generation(docnames: str):
     """
     Enqueue bulk generation of e-Invoices for the given Sales Invoices.
     """
@@ -83,31 +92,20 @@ def generate_e_invoices(docnames, force=False):
     Permission checks are done in the `generate_e_invoice` function.
     """
 
-    def log_error():
+    def log_error(docname=None):
         frappe.log_error(
-            title=_("e-Invoice generation failed for Sales Invoice {0}").format(
-                docname
-            ),
+            title=_("e-Invoice generation failed for Sales Invoice {0}").format(docname),
             message=frappe.get_traceback(),
+            reference_doctype="Sales Invoice",
+            reference_name=docname,
         )
 
     for docname in docnames:
         try:
-            generate_e_invoice(docname, throw=False, force=force)
-
-        except GSPServerError:
-            frappe.db.set_value(
-                "Sales Invoice",
-                {"name": ("in", docnames), "irn": ("is", "not set")},
-                "einvoice_status",
-                "Auto-Retry",
-            )
-
-            log_error()
-            frappe.clear_last_message()
+            generate_e_invoice(docname, force=force)
 
         except Exception:
-            log_error()
+            log_error(docname=docname)
             frappe.clear_last_message()
 
         finally:
@@ -117,12 +115,19 @@ def generate_e_invoices(docnames, force=False):
 
 
 @frappe.whitelist()
-def generate_e_invoice(docname, throw=True, force=False):
+def generate_e_invoice(docname: str, throw: bool = True, force: bool = False):
+    """Permission check not required as load_doc checks permissions."""
     doc = load_doc("Sales Invoice", docname, "submit")
 
     settings = frappe.get_cached_doc("GST Settings")
 
     try:
+        if doc.irn:
+            frappe.throw(
+                _("e-Invoice has already been generated for Sales Invoice {0}").format(frappe.bold(doc.name)),
+                exc=AlreadyGeneratedError,
+            )
+
         if (
             not force
             and settings.enable_retry_einv_ewb_generation
@@ -157,39 +162,102 @@ def generate_e_invoice(docname, throw=True, force=False):
 
         # Handle Invalid GSTIN Error
         if result.error_code in ("3028", "3029", "3001"):
-            gstin = data.get("BuyerDtls").get("Gstin")
+            if result.error_code == "3001":
+                gstin = data.get("BuyerDtls").get("Gstin")
+            else:
+                match = GSTIN_FORMAT.search(result.error_message)
+                if not match:
+                    frappe.throw(
+                        _("Could not identify GSTIN from error: {0}").format(
+                            result.error_message or _("Unknown error")
+                        )
+                    )
+
+                gstin = match.group()
+
             response = api.sync_gstin_info(gstin)
 
             if response.Status != "ACT":
-                frappe.throw(_("GSTIN {0} status is not Active").format(gstin))
+                frappe.throw(result.error_message, title=_("Error Generating e-Invoice"))
 
             result = api.generate_irn(data)
+
+        if not result.Irn:
+            frappe.throw(_("e-Invoice generation failed"))
 
     except GSPServerError as e:
         handle_server_errors(settings, doc, "e-Invoice", e)
         return
 
-    except frappe.ValidationError as e:
-        doc.db_set({"einvoice_status": "Failed"})
-
+    except AlreadyGeneratedError as e:
         if throw:
-            raise e
+            raise
 
-        frappe.clear_last_message()
-        frappe.msgprint(
-            _(
-                "e-Invoice auto-generation failed with error:<br>{0}<br><br>"
-                "Please rectify this issue and generate e-Invoice manually."
-            ).format(str(e)),
-            _("Warning"),
-            indicator="yellow",
-        )
+        if frappe.request:
+            frappe.clear_last_message()
+            frappe.msgprint(str(e), _("Warning"), indicator="yellow", alert=True)
 
         return
 
-    except Exception as e:
-        doc.db_set({"einvoice_status": "Failed"})
-        raise e
+    except NotApplicableError as e:
+        if not frappe.flags.in_test:
+            frappe.db.rollback()
+
+        set_einvoice_status(
+            doc,
+            "Not Applicable",
+            commit=not frappe.flags.in_test,
+            notify=bool(frappe.request),
+        )
+
+        if throw:
+            raise
+
+        if frappe.request:
+            frappe.clear_last_message()
+            frappe.msgprint(str(e), _("e-Invoice Not Applicable"))
+
+        return
+
+    except (frappe.ValidationError, frappe.MandatoryError) as e:
+        if not frappe.flags.in_test:
+            frappe.db.rollback()
+
+        set_einvoice_status(
+            doc,
+            "Failed",
+            commit=not frappe.flags.in_test,
+            notify=bool(frappe.request),
+        )
+
+        if throw:
+            raise
+
+        if frappe.request:
+            frappe.clear_last_message()
+            frappe.msgprint(
+                _(
+                    "e-Invoice auto-generation failed with error:<br>{0}<br><br>"
+                    "Please rectify this issue and generate e-Invoice manually."
+                ).format(str(e)),
+                _("Error Generating e-Invoice"),
+                indicator="red",
+            )
+
+        return
+
+    except Exception:
+        if not frappe.flags.in_test:
+            frappe.db.rollback()
+
+        set_einvoice_status(
+            doc,
+            "Failed",
+            commit=not frappe.flags.in_test,
+            notify=bool(frappe.request),
+        )
+
+        raise
 
     return log_and_process_e_invoice_generation(doc, result, api.sandbox_mode)
 
@@ -197,12 +265,12 @@ def generate_e_invoice(docname, throw=True, force=False):
 @frappe.whitelist()
 @otp_handler
 def handle_duplicate_irn_error(
-    irn_data,
-    current_gstin,
-    current_invoice_amount,
-    doc=None,
-    docname=None,
-    taxpayer_api=False,
+    irn_data: str | dict | frappe._dict,
+    current_gstin: str,
+    current_invoice_amount: float,
+    doc: str | dict | Document | None = None,
+    docname: str | None = None,
+    taxpayer_api: bool = False,
 ):
     """
     Handle Duplicate IRN errors by fetching the IRN details and comparing with the current invoice.
@@ -216,6 +284,11 @@ def handle_duplicate_irn_error(
     if isinstance(irn_data, str):
         irn_data = json.loads(irn_data, object_hook=frappe._dict)
         current_invoice_amount = flt(current_invoice_amount)
+    elif isinstance(irn_data, dict):
+        irn_data = frappe._dict(irn_data)
+
+    if doc and not isinstance(doc, Document):
+        doc = None  # To avoid doc injection
 
     doc = doc or load_doc("Sales Invoice", docname, "submit")
 
@@ -230,10 +303,7 @@ def handle_duplicate_irn_error(
 
     # Handle error 2283:
     # IRN details cannot be provided as it is generated more than 2 days ago
-    if (
-        response.error_code == "2283"
-        and api.settings.fetch_e_invoice_details_from_gst_portal
-    ):
+    if response.error_code == "2283" and api.settings.fetch_e_invoice_details_from_gst_portal:
         response.update(
             {
                 "irn_data": irn_data,
@@ -252,22 +322,21 @@ def handle_duplicate_irn_error(
     if response.error_code:
         response = irn_data
 
+    if not response.Irn:
+        frappe.throw(_("e-Invoice generation failed"))
+
     return log_and_process_e_invoice_generation(doc, response, api.sandbox_mode)
 
 
 def verify_e_invoice_details(current_gstin, current_invoice_amount, signed_data):
-    invoice_data = json.loads(
-        jwt.decode(signed_data, options={"verify_signature": False})["data"]
-    )
+    invoice_data = json.loads(jwt.decode(signed_data, options={"verify_signature": False})["data"])
 
     previous_gstin = invoice_data.get("BuyerDtls").get("Gstin")
     previous_invoice_amount = invoice_data.get("ValDtls").get("TotInvVal")
 
     error_message = ""
     if previous_gstin != current_gstin:
-        error_message += _("<li>Customer GSTIN (Previous: {0}).</li>").format(
-            frappe.bold(previous_gstin)
-        )
+        error_message += _("<li>Customer GSTIN (Previous: {0}).</li>").format(frappe.bold(previous_gstin))
 
     if previous_invoice_amount != current_invoice_amount:
         previous_invoice_amount_formatted = frappe.format_value(
@@ -308,9 +377,7 @@ def log_and_process_e_invoice_generation(doc, result, sandbox_mode=False, messag
     invoice_data = None
     if result.SignedInvoice:
         decoded_invoice = json.loads(
-            jwt.decode(result.SignedInvoice, options={"verify_signature": False})[
-                "data"
-            ]
+            jwt.decode(result.SignedInvoice, options={"verify_signature": False})["data"]
         )
         invoice_data = frappe.as_json(decoded_invoice, indent=4)
 
@@ -344,7 +411,7 @@ def log_and_process_e_invoice_generation(doc, result, sandbox_mode=False, messag
 
 
 @frappe.whitelist()
-def cancel_e_invoice(docname, values):
+def cancel_e_invoice(docname: str, values: str | dict | frappe._dict):
     doc = load_doc("Sales Invoice", docname, "cancel")
     values = frappe.parse_json(values)
 
@@ -367,9 +434,7 @@ def _cancel_e_invoice(doc, values):
 
     result = EInvoiceAPI.create(doc).cancel_irn(data)
 
-    log_and_process_e_invoice_cancellation(
-        doc, values, result, "e-Invoice cancelled successfully"
-    )
+    log_and_process_e_invoice_cancellation(doc, values, result, "e-Invoice cancelled successfully")
 
     doc.cancel()
 
@@ -401,7 +466,7 @@ def log_and_process_e_invoice_cancellation(doc, values, result, message):
 
 
 @frappe.whitelist()
-def mark_e_invoice_as_generated(doctype, docname, values):
+def mark_e_invoice_as_generated(doctype: str, docname: str, values: str | dict | frappe._dict):
     doc = load_doc(doctype, docname, "submit")
 
     values = frappe.parse_json(values)
@@ -414,13 +479,11 @@ def mark_e_invoice_as_generated(doctype, docname, values):
         }
     )
 
-    return log_and_process_e_invoice_generation(
-        doc, result, message="e-Invoice updated successfully"
-    )
+    return log_and_process_e_invoice_generation(doc, result, message="e-Invoice updated successfully")
 
 
 @frappe.whitelist()
-def mark_e_invoice_as_cancelled(doctype, docname, values):
+def mark_e_invoice_as_cancelled(doctype: str, docname: str, values: str | dict | frappe._dict):
     doc = load_doc(doctype, docname, "cancel")
 
     if doc.docstatus != 2:
@@ -434,9 +497,7 @@ def mark_e_invoice_as_cancelled(doctype, docname, values):
         }
     )
 
-    log_and_process_e_invoice_cancellation(
-        doc, values, result, "e-Invoice marked as cancelled successfully"
-    )
+    log_and_process_e_invoice_cancellation(doc, values, result, "e-Invoice marked as cancelled successfully")
 
     return send_updated_doc(doc)
 
@@ -466,24 +527,18 @@ def _log_e_invoice(log_data):
 
 
 def validate_e_invoice_applicability(doc, gst_settings=None, throw=True):
-    def _throw(error):
+    def _throw(error, exc=NotApplicableError):
         if throw:
-            frappe.throw(error)
-
-    if doc.company_gstin == doc.billing_address_gstin:
-        return _throw(
-            _(
-                "e-Invoice is not applicable for invoices with same company and billing"
-                " GSTIN"
-            )
-        )
+            frappe.throw(error, exc=exc)
 
     if doc.irn:
         return _throw(
-            _("e-Invoice has already been generated for Sales Invoice {0}").format(
-                frappe.bold(doc.name)
-            )
+            _("e-Invoice has already been generated for Sales Invoice {0}").format(frappe.bold(doc.name)),
+            exc=AlreadyGeneratedError,
         )
+
+    if doc.company_gstin == doc.billing_address_gstin:
+        return _throw(_("e-Invoice is not applicable for invoices with same company and billing GSTIN"))
 
     if not validate_taxable_item(doc, throw=throw):
         # e-Invoice not required for invoice wih all nill-rated/exempted items.
@@ -498,21 +553,16 @@ def validate_e_invoice_applicability(doc, gst_settings=None, throw=True):
     if not gst_settings.enable_e_invoice:
         return _throw(_("e-Invoice is not enabled in GST Settings"))
 
-    applicability_date = get_e_invoice_applicability_date(
-        doc.company, gst_settings, throw
-    )
+    applicability_date = get_e_invoice_applicability_date(doc.company, gst_settings, throw)
 
     if not applicability_date:
-        return _throw(
-            _("e-Invoice is not applicable for company {0}").format(doc.company)
-        )
+        return _throw(_("e-Invoice is not applicable for company {0}").format(doc.company))
 
     if getdate(applicability_date) > getdate(doc.posting_date):
         return _throw(
-            _(
-                "e-Invoice is not applicable for invoices before {0} as per your"
-                " GST Settings"
-            ).format(frappe.bold(format_date(applicability_date)))
+            _("e-Invoice is not applicable for invoices before {0} as per your GST Settings").format(
+                frappe.bold(format_date(applicability_date))
+            )
         )
 
     return True
@@ -535,6 +585,7 @@ def validate_taxable_item(doc, throw=True):
 
     frappe.throw(
         _("e-Invoice is not applicable for invoice with only Nil-Rated/Exempted items"),
+        exc=NotApplicableError,
     )
 
 
@@ -547,15 +598,12 @@ def validate_if_e_invoice_can_be_cancelled(doc, throw=True):
 
     if (
         not acknowledged_on
-        or add_to_date(get_datetime(acknowledged_on), days=1, as_datetime=True)
-        < get_datetime()
+        or add_to_date(get_datetime(acknowledged_on), days=1, as_datetime=True) < get_datetime()
     ):
         if not throw:
             return False
 
-        frappe.throw(
-            _("e-Invoice can only be cancelled upto 24 hours after it is generated")
-        )
+        frappe.throw(_("e-Invoice can only be cancelled upto 24 hours after it is generated"))
 
 
 def retry_e_invoice_e_waybill_generation():
@@ -564,10 +612,7 @@ def retry_e_invoice_e_waybill_generation():
     if settings.sandbox_mode and not frappe.flags.in_test:
         return
 
-    if not (
-        settings.enable_retry_einv_ewb_generation
-        and settings.is_retry_einv_ewb_generation_pending
-    ):
+    if not (settings.enable_retry_einv_ewb_generation and settings.is_retry_einv_ewb_generation_pending):
         return
 
     settings.db_set("is_retry_einv_ewb_generation_pending", 0, update_modified=False)
@@ -623,8 +668,7 @@ class EInvoiceData(GSTTransactionData):
         Non Taxable Value should be added to other charges.
         """
         self.transaction_details.other_charges = self.rounded(
-            self.transaction_details.other_charges
-            + self.transaction_details.total_non_taxable_value
+            self.transaction_details.other_charges + self.transaction_details.total_non_taxable_value
         )
 
     def validate_transaction(self):
@@ -639,9 +683,7 @@ class EInvoiceData(GSTTransactionData):
 
         if len(self.doc.items) > ITEM_LIMIT:
             frappe.throw(
-                _("e-Invoice can only be generated for upto {0} items").format(
-                    ITEM_LIMIT
-                ),
+                _("e-Invoice can only be generated for upto {0} items").format(ITEM_LIMIT),
                 title=_("Item Limit Exceeded"),
             )
 
@@ -650,33 +692,25 @@ class EInvoiceData(GSTTransactionData):
             {
                 "discount_amount": 0,
                 "serial_no": "",
-                "is_service_item": "Y" if item.gst_hsn_code.startswith("99") else "N",
+                "is_service_item": ("Y" if item.gst_hsn_code.startswith(SERVICE_HSN_PREFIX) else "N"),
                 "unit_rate": (
                     abs(self.rounded(item.taxable_value / item.qty, 3))
                     if item.qty
                     else abs(self.rounded(item.taxable_value, 3))
                 ),
-                "barcode": self.sanitize_value(
-                    item.barcode, max_length=30, truncate=False
-                ),
+                "barcode": self.sanitize_value(item.barcode, max_length=30, truncate=False),
             }
         )
 
         if self.doc.is_reverse_charge:
-            item_details["total_value"] = item.taxable_value
+            item_details["total_value"] = abs(self.rounded(item.taxable_value, 2))
 
-        if batch_no := self.sanitize_value(
-            item.batch_no, max_length=20, truncate=False
-        ):
-            batch_expiry_date = frappe.db.get_value(
-                "Batch", item.batch_no, "expiry_date"
-            )
+        if batch_no := self.sanitize_value(item.batch_no, max_length=20, truncate=False):
+            batch_expiry_date = frappe.db.get_value("Batch", item.batch_no, "expiry_date")
             item_details.update(
                 {
                     "batch_no": batch_no,
-                    "batch_expiry_date": format_date(
-                        batch_expiry_date, self.DATE_FORMAT
-                    ),
+                    "batch_expiry_date": format_date(batch_expiry_date, self.DATE_FORMAT),
                 }
             )
 
@@ -694,9 +728,7 @@ class EInvoiceData(GSTTransactionData):
                     {
                         "original_name": return_against,
                         "original_date": format_date(
-                            frappe.db.get_value(
-                                "Sales Invoice", return_against, "posting_date"
-                            ),
+                            frappe.db.get_value("Sales Invoice", return_against, "posting_date"),
                             self.DATE_FORMAT,
                         ),
                     }
@@ -706,12 +738,9 @@ class EInvoiceData(GSTTransactionData):
             {
                 "tax_scheme": "GST",
                 "supply_type": self.get_supply_type(),
-                "reverse_charge": (
-                    "Y" if getattr(self.doc, "is_reverse_charge", 0) else "N"
-                ),
+                "reverse_charge": ("Y" if getattr(self.doc, "is_reverse_charge", 0) else "N"),
                 "invoice_type": invoice_type,
                 "ecommerce_gstin": self.doc.ecommerce_gstin,
-                "place_of_supply": self.doc.place_of_supply.split("-")[0],
             }
         )
 
@@ -723,21 +752,15 @@ class EInvoiceData(GSTTransactionData):
         credit_days = 0
         paid_amount = 0
 
-        if self.doc.due_date and getdate(self.doc.due_date) > getdate(
-            self.doc.posting_date
-        ):
-            credit_days = (
-                getdate(self.doc.due_date) - getdate(self.doc.posting_date)
-            ).days
+        if self.doc.due_date and getdate(self.doc.due_date) > getdate(self.doc.posting_date):
+            credit_days = (getdate(self.doc.due_date) - getdate(self.doc.posting_date)).days
 
         if (self.doc.is_pos or self.doc.advances) and self.doc.base_paid_amount:
             paid_amount = abs(self.rounded(self.doc.base_paid_amount))
 
         self.transaction_details.update(
             {
-                "payee_name": (
-                    self.sanitize_value(self.doc.company) if paid_amount else ""
-                ),
+                "payee_name": (self.sanitize_value(self.doc.company) if paid_amount else ""),
                 "mode_of_payment": self.get_mode_of_payment(),
                 "paid_amount": paid_amount,
                 "credit_days": credit_days,
@@ -764,9 +787,13 @@ class EInvoiceData(GSTTransactionData):
         return supply_type
 
     def set_transporter_details(self):
+        threshold = _get_e_waybill_threshold(self.doc, self.settings)
+
         if (
+            # e-waybill is not applicable for intrastate
+            threshold is None
             # e-waybill threshold is not met
-            self.transaction_details.grand_total < self.settings.e_waybill_threshold
+            or self.transaction_details.grand_total < threshold
             # e-waybill auto-generation is disabled by user
             or not self.settings.generate_e_waybill_with_e_invoice
             # e-waybill is already generated
@@ -783,9 +810,7 @@ class EInvoiceData(GSTTransactionData):
             self.doc.customer_address,
             validate_gstin=self.doc.gst_category != "Overseas",
         )
-        self.company_address = self.get_address_details(
-            self.doc.company_address, validate_gstin=True
-        )
+        self.company_address = self.get_address_details(self.doc.company_address, validate_gstin=True)
 
         ship_to_address = (
             self.doc.port_address
@@ -800,13 +825,8 @@ class EInvoiceData(GSTTransactionData):
         if ship_to_address and self.doc.customer_address != ship_to_address:
             self.shipping_address = self.get_address_details(ship_to_address)
 
-        if (
-            self.doc.dispatch_address_name
-            and self.doc.company_address != self.doc.dispatch_address_name
-        ):
-            self.dispatch_address = self.get_address_details(
-                self.doc.dispatch_address_name
-            )
+        if self.doc.dispatch_address_name and self.doc.company_address != self.doc.dispatch_address_name:
+            self.dispatch_address = self.get_address_details(self.doc.dispatch_address_name)
 
         self.billing_address.legal_name = self.transaction_details.party_name
         self.company_address.legal_name = self.transaction_details.company_name
@@ -823,9 +843,7 @@ class EInvoiceData(GSTTransactionData):
                 self.dispatch_address.update(seller)
 
             self.transaction_details.name = (
-                random_string(6).lstrip("0")
-                if not frappe.flags.in_test
-                else "test_invoice_no"
+                random_string(6).lstrip("0") if not frappe.flags.in_test else "test_invoice_no"
             )
 
             # For overseas transactions, dummy GSTIN is not needed
@@ -840,9 +858,9 @@ class EInvoiceData(GSTTransactionData):
                     self.shipping_address.update(buyer)
 
                 if self.transaction_details.total_igst_amount > 0:
-                    self.transaction_details.place_of_supply = "36"
+                    self.transaction_details.pos_state_code = "36"
                 else:
-                    self.transaction_details.place_of_supply = "02"
+                    self.transaction_details.pos_state_code = "02"
 
         invoice_data = {
             "Version": "1.1",
@@ -876,7 +894,7 @@ class EInvoiceData(GSTTransactionData):
                 "Loc": self.billing_address.city,
                 "Pin": self.billing_address.pincode,
                 "Stcd": self.billing_address.state_number,
-                "Pos": self.transaction_details.place_of_supply,
+                "Pos": self.transaction_details.pos_state_code,
             },
             "ItemList": self.item_list,
             "ValDtls": {
@@ -988,11 +1006,38 @@ class EInvoiceData(GSTTransactionData):
             return export_details
 
         export_details["ShipBNo"] = self.doc.shipping_bill_number
-        export_details["ShipBDt"] = format_date(
-            self.doc.shipping_bill_date, self.DATE_FORMAT
-        )
+        export_details["ShipBDt"] = format_date(self.doc.shipping_bill_date, self.DATE_FORMAT)
 
         if self.doc.port_code in PORT_CODES:
             export_details["Port"] = self.doc.port_code
 
         return export_details
+
+
+#######################################################################################
+### Auto Cancel e-Invoice Functions ###################################################
+#######################################################################################
+
+
+def auto_cancel_e_invoice(doc, gst_settings=None):
+    gst_settings = gst_settings or frappe.get_cached_doc("GST Settings")
+
+    if not (doc.irn and gst_settings.enable_e_invoice and gst_settings.auto_cancel_e_invoice):
+        return
+
+    generated_on = doc.get_onload().get("e_invoice_info", {}).get("acknowledged_on")
+    reason = gst_settings.reason_for_e_invoice_cancellation
+
+    if not generated_on or (add_days(generated_on, 1) < get_datetime()):
+        return
+
+    values = frappe._dict(
+        {
+            "reason": reason,
+            "remark": "",
+        }
+    )
+
+    _cancel_e_invoice(doc, values)
+
+    return True

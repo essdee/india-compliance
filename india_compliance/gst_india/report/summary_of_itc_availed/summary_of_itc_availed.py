@@ -5,9 +5,13 @@ from collections import defaultdict
 
 import frappe
 from frappe import _
-from frappe.query_builder import Case
 from frappe.query_builder.custom import ConstantColumn
 from frappe.query_builder.functions import IfNull
+
+from india_compliance.gst_india.constants import SERVICE_HSN_PREFIX
+from india_compliance.gst_india.utils.itc_claim import (
+    apply_period_filter as _apply_itc_period_filter,
+)
 
 TAX_FIELDS = (
     "igst_amount",
@@ -68,17 +72,19 @@ class ITCAvailedCategory:
         itc_classification = row.get("itc_classification")
         is_reverse_charge = row.get("is_reverse_charge")
 
-        if gst_category == "Unregistered" and is_reverse_charge:
+        # sequence of check is important because bill of entry dosen't have gst_category.
+        if itc_classification == "Import Of Goods":
+            return Category.IMPORT_GOODS
+
+        # Import classifications take precedence over RCM
+        elif itc_classification == "Import Of Service":
+            return Category.IMPORT_SERVICES
+
+        elif gst_category == "Unregistered" and is_reverse_charge:
             return Category.UNREG_RCM
 
         elif gst_category != "Unregistered" and is_reverse_charge:
             return Category.REG_RCM
-
-        elif itc_classification == "Import Of Goods":
-            return Category.IMPORT_GOODS
-
-        elif itc_classification == "Import Of Service" and gst_category != "SEZ":
-            return Category.IMPORT_SERVICES
 
         elif itc_classification == "Input Service Distributor":
             return Category.ITC_FROM_ISD
@@ -93,7 +99,7 @@ class ITCAvailedCategory:
         elif row.get("is_fixed_asset") == 1:
             return SubCategory.CAPITAL_GOODS
 
-        elif (row.get("gst_hsn_code") or "").startswith("99"):
+        elif (row.get("gst_hsn_code") or "").startswith(SERVICE_HSN_PREFIX):
             return SubCategory.INPUT_SERVICES
 
         return SubCategory.INPUTS
@@ -104,6 +110,15 @@ class ITCAvailedData:
         filters = frappe._dict(filters or {})
         filters.from_date, filters.to_date = filters.date_range
         self.filters = filters
+
+    def apply_itc_period_filter(self, query, doc):
+        return _apply_itc_period_filter(
+            query,
+            doc,
+            self.filters.get("from_date"),
+            self.filters.get("to_date"),
+            filter_by=self.filters.get("filter_by"),
+        )
 
     def _get_data(self) -> list[dict]:
         return self._get_bill_of_entry_data() + self._get_purchase_invoice_data()
@@ -121,10 +136,12 @@ class ITCAvailedData:
                 doc.itc_classification,
                 doc_item.is_fixed_asset,
                 doc.is_reverse_charge,
+                doc_item.gst_hsn_code,
             )
             .where(
                 (doc.company_gstin != IfNull(doc.supplier_gstin, ""))
                 & (doc.is_opening == "No")
+                & (doc.is_boe_applicable == 0)
             )
         )
 
@@ -144,10 +161,7 @@ class ITCAvailedData:
             .inner_join(item)
             .on(doc_item.item_code == item.item_code)
             .select(
-                Case("itc_classification")
-                .when(doc_item.gst_hsn_code.like("99%"), "Import Of Service")
-                .else_("Import Of Goods"),
-                ConstantColumn("Overseas").as_("gst_category"),
+                ConstantColumn("Import Of Goods").as_("itc_classification"),
                 item.is_fixed_asset,
             )
         )
@@ -162,15 +176,9 @@ class ITCAvailedData:
             doc_item.sgst_amount,
             doc_item.igst_amount,
             (doc_item.cess_amount + doc_item.cess_non_advol_amount).as_("cess_amount"),
-        ).where(
-            (doc.docstatus == 1)
-            & (
-                doc.posting_date[
-                    self.filters.get("from_date") : self.filters.get("to_date")
-                ]
-            )
-            & (doc.company == self.filters.get("company"))
-        )
+        ).where((doc.docstatus == 1) & (doc.company == self.filters.get("company")))
+
+        query = self.apply_itc_period_filter(query, doc)
 
         if self.filters.get("company_gstin"):
             query = query.where(doc.company_gstin == self.filters.get("company_gstin"))
@@ -183,9 +191,7 @@ class ITCAvailed(ITCAvailedCategory, ITCAvailedData):
         summary = {}
 
         for category, subcategories in ITC_AVAILED_CATEGORY_MAPPING.items():
-            summary[category] = {
-                subcategory: defaultdict(float) for subcategory in subcategories
-            }
+            summary[category] = {subcategory: defaultdict(float) for subcategory in subcategories}
 
         return summary
 

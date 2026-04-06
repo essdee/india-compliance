@@ -1,8 +1,8 @@
-$(document).on("app_ready", async function() {
+$(document).on("app_ready", async function () {
     if (!frappe.boot.needs_audit_trail_notification) return;
 
     // let other processes finish
-    await new Promise(resolve => setTimeout(resolve, 700));
+    await new Promise((resolve) => setTimeout(resolve, 700));
     const d = frappe.msgprint({
         title: __("Configure Audit Trail"),
         indicator: "orange",
@@ -12,7 +12,7 @@ $(document).on("app_ready", async function() {
 
             In accordance with
             <a
-              href='https://www.mca.gov.in/Ministry/pdf/AccountsAmendmentRules_24032021.pdf'
+              href='https://egazette.gov.in/WriteReadData/2021/226081.pdf'
               target='_blank'
             >MCA Notification dated 24-03-2021</a>,
             all companies registered in India are required to maintain an Audit Trail
@@ -35,7 +35,7 @@ $(document).on("app_ready", async function() {
             </ul>
 
 
-            Would you like to enable the same?`
+            Would you like to enable the same?`,
         ),
     });
 

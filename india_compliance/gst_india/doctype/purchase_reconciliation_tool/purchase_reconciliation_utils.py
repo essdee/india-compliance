@@ -4,19 +4,18 @@ from india_compliance.gst_india.doctype.purchase_reconciliation_tool import (
     BaseUtil,
     ReconciledData,
 )
+from india_compliance.gst_india.utils.itc_claim import set_itc_claim_period_on_match
 
 
 def link_documents(purchase_invoice_name, inward_supply_name, link_doctype):
     purchases = []
     inward_supplies = []
 
-    if not purchase_invoice_name or not inward_supply_name:
+    if not purchase_invoice_name or not inward_supply_name or not link_doctype:
         return purchases, inward_supplies
 
     # silently handle existing links
-    if isup_linked_with := frappe.db.get_value(
-        "GST Inward Supply", inward_supply_name, "link_name"
-    ):
+    if isup_linked_with := frappe.db.get_value("GST Inward Supply", inward_supply_name, "link_name"):
         set_reconciliation_status(link_doctype, (isup_linked_with,), "Unreconciled")
         _unlink_documents((inward_supply_name,))
         purchases.append(isup_linked_with)
@@ -25,10 +24,8 @@ def link_documents(purchase_invoice_name, inward_supply_name, link_doctype):
         "link_doctype": link_doctype,
         "link_name": purchase_invoice_name,
     }
-    if pur_linked_with := frappe.db.get_all(
-        "GST Inward Supply", link_doc, pluck="name"
-    ):
-        _unlink_documents((pur_linked_with))
+    if pur_linked_with := frappe.db.get_all("GST Inward Supply", link_doc, pluck="name"):
+        _unlink_documents(pur_linked_with)
         inward_supplies.extend(pur_linked_with)
 
     link_doc["match_status"] = "Manual Match"
@@ -36,6 +33,12 @@ def link_documents(purchase_invoice_name, inward_supply_name, link_doctype):
     # link documents
     frappe.db.set_value("GST Inward Supply", inward_supply_name, link_doc)
     set_reconciliation_status(link_doctype, (purchase_invoice_name,), "Match Found")
+
+    set_itc_claim_period_on_match(
+        [purchase_invoice_name],
+        {inward_supply_name: purchase_invoice_name},
+        doctype=link_doctype,
+    )
 
     purchases.append(purchase_invoice_name)
     inward_supplies.append(inward_supply_name)
@@ -62,6 +65,9 @@ def unlink_documents(data):
     set_reconciliation_status("Purchase Invoice", purchases, "Unreconciled")
     set_reconciliation_status("Bill of Entry", boe, "Unreconciled")
     _unlink_documents(inward_supplies)
+
+    # Note: We do NOT clear itc_claim_period on unlink
+    # User can manually change it if needed
 
     return purchases.union(boe), inward_supplies
 
@@ -105,12 +111,8 @@ def get_formatted_options(data):
         if not row.get("classification"):
             row.classification = ReconciledData.guess_classification(row)
 
-        row.description = (
-            f"{row.bill_no}, {row.bill_date}, Taxable Amount: {row.taxable_value}"
-        )
-        row.description += (
-            f", Tax Amount: {BaseUtil.get_total_tax(row)}, {row.classification}"
-        )
+        row.description = f"{row.bill_no}, {row.bill_date}, Taxable Amount: {row.taxable_value}"
+        row.description += f", Tax Amount: {BaseUtil.get_total_tax(row)}, {row.classification}"
 
     return data
 
@@ -119,6 +121,4 @@ def set_reconciliation_status(doctype, names, status):
     if not names:
         return
 
-    frappe.db.set_value(
-        doctype, {"name": ("in", names)}, "reconciliation_status", status
-    )
+    frappe.db.set_value(doctype, {"name": ("in", names)}, "reconciliation_status", status)

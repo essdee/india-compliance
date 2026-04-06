@@ -1,14 +1,18 @@
 from base64 import b64decode
+from typing import ClassVar
 from urllib.parse import urljoin
 
-import requests
-
 import frappe
+import requests
 from frappe import _
 from frappe.utils import sbool
 from frappe.utils.scheduler import is_scheduler_disabled
 
-from india_compliance.exceptions import GatewayTimeoutError, GSPServerError
+from india_compliance.exceptions import (
+    GatewayTimeoutError,
+    GSPLimitExceededError,
+    GSPServerError,
+)
 from india_compliance.gst_india.utils import is_api_enabled
 from india_compliance.gst_india.utils.api import enqueue_integration_request
 
@@ -23,11 +27,7 @@ class BaseAPI:
     def __init__(self, *args, **kwargs):
         self.settings = frappe.get_cached_doc("GST Settings")
         if not is_api_enabled(self.settings):
-            frappe.throw(
-                _("Please enable API in GST Settings to use the {0} API").format(
-                    self.API_NAME
-                )
-            )
+            frappe.throw(_("Please enable API in GST Settings to use the {0} API").format(self.API_NAME))
 
         self.company_gstin = None
         self.auth_strategy = None
@@ -53,8 +53,7 @@ class BaseAPI:
         else:
             frappe.throw(
                 _(
-                    "Please set the relevant credentials for GSTIN {0} in GST Settings to use the"
-                    " {1} API"
+                    "Please set the relevant credentials for GSTIN {0} in GST Settings to use the {1} API"
                 ).format(gstin, self.API_NAME),
                 frappe.DoesNotExistError,
                 title=_("Credentials Unavailable"),
@@ -70,6 +69,7 @@ class BaseAPI:
         self.session_key = b64decode(row.session_key or "")
         self.session_expiry = row.session_expiry
         self.auth_token = row.auth_token
+        self.session_ip = row.session_ip
 
     def get_url(self, *parts):
         parts = list(parts)
@@ -137,6 +137,7 @@ class BaseAPI:
                     "body": json_data,
                 }
 
+        response = None
         response_json = None
 
         try:
@@ -164,9 +165,7 @@ class BaseAPI:
                     response_json = response.content
 
                 else:
-                    frappe.throw(
-                        _("Error parsing response: {0}").format(response.content)
-                    )
+                    frappe.throw(_("Error parsing response: {0}").format(response.content))
 
             response_json = self.process_response(response_json)
 
@@ -182,6 +181,11 @@ class BaseAPI:
         finally:
             if response_json:
                 log.output = response_json.copy()
+            elif response:
+                log.output = {
+                    "status_code": response.status_code,
+                    "content": response.text,
+                }
 
             self.mask_sensitive_info(log)
 
@@ -224,18 +228,25 @@ class BaseAPI:
                 title=_("API Request Failed"),
             )
 
-    def handle_server_error(self, error_messages):
-        error_message_list = [
+    ERROR_MESSAGES: ClassVar[dict] = {
+        GSPServerError: (
             "GSPGSTDOWN",
             "GSPERR300",
             "Connection reset",
             "No route to host",
-        ]
+        ),
+        GSPLimitExceededError: ("GEN5005",),
+    }
 
-        for message in error_messages:
-            for error in error_message_list:
-                if error in message:
-                    raise GSPServerError
+    def handle_server_error(self, error_messages):
+        for exception, error_message_list in self.ERROR_MESSAGES.items():
+            for error_pattern in error_message_list:
+                if any(error_pattern in msg for msg in error_messages if msg):
+                    frappe.throw(
+                        msg=exception.message,
+                        exc=exception,
+                        title=exception.title,
+                    )
 
     def is_ignored_error(self, response_json):
         # Override in subclass, return truthy value to stop frappe.throw
@@ -244,9 +255,7 @@ class BaseAPI:
     def handle_http_code(self, status_code, response_json):
         # GSP connectivity issues
         if status_code == 401 or (
-            status_code == 403
-            and response_json
-            and response_json.get("error") == "access_denied"
+            status_code == 403 and response_json and response_json.get("error") == "access_denied"
         ):
             frappe.throw(
                 _(

@@ -61,6 +61,7 @@ EXPORT_TYPES = (
 )
 
 TAXABLE_GST_TREATMENTS = ("Taxable", "Zero-Rated")
+IMPORT_GST_CATEGORIES = ("Overseas", "SEZ")
 
 
 STATE_NUMBERS = {
@@ -1404,6 +1405,7 @@ GST_TAX_RATES = {
     12.000,
     18.000,
     28.000,
+    40.000,
 }
 
 # REGEX PATTERNS (https://developer.gst.gov.in/apiportal/taxpayer/returns)
@@ -1422,6 +1424,8 @@ OVERSEAS = re.compile(rf"{NRI_ID}|{OIDAR}")
 UNBODY = re.compile(r"^[0-9]{4}[A-Z]{3}[0-9]{5}[UO]{1}[N][A-Z0-9]{1}$")
 TDS = re.compile(r"^[0-9]{2}[A-Z]{4}[A-Z0-9]{1}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[D][0-9A-Z]$")
 TCS = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[C]{1}[0-9A-Z]{1}$")
+
+GSTIN_FORMAT = re.compile(r"[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}")
 
 GSTIN_FORMATS = {
     "Registered Regular": REGISTERED,
@@ -1479,3 +1483,6 @@ ORIGINAL_VS_AMENDED = (
 )
 
 E_INVOICE_MASTER_CODES_URL = "https://einvoice1.gst.gov.in/Others/MasterCodes"
+
+VALID_HSN_LENGTHS = (4, 6, 8)
+SERVICE_HSN_PREFIX = "99"

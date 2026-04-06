@@ -87,9 +87,7 @@ class TestTransactionData(FrappeTestCase):
 
         self.assertRaisesRegex(
             frappe.exceptions.ValidationError,
-            re.compile(
-                r"^(Postal Code for Address.* must be a 6-digit number and cannot start with 0)$"
-            ),
+            re.compile(r"^(Postal Code for Address.* must be a 6-digit number and cannot start with 0)$"),
             GSTTransactionData(doc).check_missing_address_fields,
             address,
         )
@@ -117,9 +115,7 @@ class TestTransactionData(FrappeTestCase):
     def test_validate_transaction(self):
         post_date = add_to_date(getdate(), days=1)
 
-        doc = create_sales_invoice(
-            posting_date=post_date, set_posting_time=True, do_not_submit=True
-        )
+        doc = create_sales_invoice(posting_date=post_date, set_posting_time=True, do_not_submit=True)
 
         self.assertRaisesRegex(
             frappe.exceptions.ValidationError,
@@ -172,6 +168,7 @@ class TestTransactionData(FrappeTestCase):
                 "total_cess_amount": 0,
                 "total_cess_non_advol_amount": 0,
                 "other_charges": 0.0,
+                "pos_state_code": doc.place_of_supply.split("-")[0],
             },
         )
 
@@ -215,6 +212,7 @@ class TestTransactionData(FrappeTestCase):
                 "total_igst_amount": 0,
                 "total_cess_amount": 0,
                 "total_cess_non_advol_amount": 0,
+                "pos_state_code": doc.place_of_supply.split("-")[0],
             },
         )
 
